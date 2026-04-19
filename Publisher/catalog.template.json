@@ -1,0 +1,4 @@
+{
+  "_deprecated": true,
+  "message": "CastleForge-CommunityMods no longer uses the old manual catalog template flow. Use New-CommunityEntry.ps1 or the in-game CREATE MOD view instead."
+}
