@@ -113,7 +113,6 @@ namespace ModBrowser
         private Rectangle _createFieldFilterRect;
         private Rectangle _createEditorSearchRect;
         private Rectangle _createFieldsTabRect;
-        private Rectangle _createSecondaryTabRect;
         private Rectangle _createTemplateTabRect;
         private Rectangle _createModSelectorRect;
         private bool _createShowTemplateTab;
@@ -123,6 +122,7 @@ namespace ModBrowser
         private Rectangle _createBuildRect;
         private Rectangle _createDiagnosticsRect;
         private Rectangle _createResetRect;
+        private Rectangle _createVisualStudioRect;
         private Rectangle _createMoveToModsRect;
         private Rectangle _createPromptPanelRect;
         private Rectangle _createPromptInputRect;
@@ -168,7 +168,6 @@ namespace ModBrowser
         private volatile bool _buildBusy;
         private bool _buildCompleted;
         private bool _buildSucceeded;
-        private string _buildPopupTitle = "Compiling Mod";
         private string _buildPopupMessage = "Press BUILD to compile the current mod.";
         private string _buildPendingProjectPath = "";
         private string _buildLastSummary = "Warnings: 0 | Errors: 0";
@@ -184,6 +183,10 @@ namespace ModBrowser
         private volatile bool _installing;
         private string _status = "Press REFRESH to load catalog.";
         private Color _statusColor = Color.LightGray;
+        private bool _showCreateModWarning;
+        private Rectangle _createModWarningPanelRect;
+        private Rectangle _createModWarningOkButtonRect;
+        private Rectangle _createModWarningBackButtonRect;
         private readonly object _previewSync = new object();
         private readonly Dictionary<string, Texture2D> _previewCache = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, byte[]> _previewByteCache = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
@@ -277,6 +280,8 @@ namespace ModBrowser
                 DrawReloadNoticePrompt(spriteBatch);
             if (_showBuildModSelectorPrompt)
                 DrawBuildModSelectorPrompt(spriteBatch);
+            if (_showCreateModWarning)
+                DrawCreateModWarningPrompt(spriteBatch);
             if (_showPublishPrompt)
                 DrawPublishPrompt(spriteBatch);
             if (_showBuildPopup)
@@ -310,7 +315,7 @@ namespace ModBrowser
                 {
                     if (_reloadNoticeCloseRect.Contains(point))
                     {
-                        ModLoader.ModManager.RequestReload("ModBrowser closed");
+                        // Note: RequestReload no longer exists in new ModManager (DLLs hooked to memory)
                         PopMe();
                         return false;
                     }
@@ -324,7 +329,7 @@ namespace ModBrowser
 
                 if (input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Enter))
                 {
-                    ModLoader.ModManager.RequestReload("ModBrowser closed");
+                    // Note: RequestReload no longer exists in new ModManager (DLLs hooked to memory)
                     PopMe();
                     return false;
                 }
@@ -334,6 +339,39 @@ namespace ModBrowser
                     return false;
                 }
 
+                return false;
+            }
+
+            if (_showCreateModWarning)
+            {
+                if (leftPressed && _createModWarningOkButtonRect.Contains(point))
+                {
+                    _showCreateModWarning = false;
+                    _viewMode = BrowserViewMode.CreateMod;
+                    _focusSearch = false;
+                    EnsureCreateTemplatesLoadedIfAny();
+                    RebuildVisibleCreateFieldIndices();
+                    return false;
+                }
+                if (leftPressed && _createModWarningBackButtonRect.Contains(point))
+                {
+                    _showCreateModWarning = false;
+                    return false;
+                }
+                if (input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Enter))
+                {
+                    _showCreateModWarning = false;
+                    _viewMode = BrowserViewMode.CreateMod;
+                    _focusSearch = false;
+                    EnsureCreateTemplatesLoadedIfAny();
+                    RebuildVisibleCreateFieldIndices();
+                    return false;
+                }
+                if (input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Escape))
+                {
+                    _showCreateModWarning = false;
+                    return false;
+                }
                 return false;
             }
 
@@ -479,18 +517,12 @@ namespace ModBrowser
             {
                 if (_publishViewRect.Contains(point))
                 {
-                    _viewMode = BrowserViewMode.CreateMod;
-                    _focusSearch = false;
-                    EnsureCreateTemplatesLoadedIfAny();
-                    RebuildVisibleCreateFieldIndices();
+                    _showCreateModWarning = true;
                     return false;
                 }
                 if (_createModViewRect.Contains(point))
                 {
-                    _viewMode = BrowserViewMode.CreateMod;
-                    _focusSearch = false;
-                    EnsureCreateTemplatesLoadedIfAny();
-                    RebuildVisibleCreateFieldIndices();
+                    _showCreateModWarning = true;
                     return false;
                 }
                 if (_backToBrowserRect.Contains(point))
@@ -525,6 +557,11 @@ namespace ModBrowser
                             _statusColor = Color.LightGreen;
                             return false;
                         }
+                        if (_createVisualStudioRect.Contains(point))
+                        {
+                            LaunchVisualStudio();
+                            return false;
+                        }
                         if (_createMoveToModsRect.Contains(point) && _createShowTemplateTab)
                         {
                             MoveCompiledModsToSteamMods();
@@ -538,11 +575,13 @@ namespace ModBrowser
                         if (_createFieldsTabRect.Contains(point))
                         {
                             _createShowTemplateTab = false;
+                            RebuildVisibleCreateFieldIndices(); // Update indices for Mod Files tab.
                             return false;
                         }
                         if (_createTemplateTabRect.Contains(point))
                         {
                             _createShowTemplateTab = true;
+                            RebuildVisibleCreateFieldIndices(); // Update indices for Template tab.
                             return false;
                         }
                         if (_createEditorRect.Contains(point))
@@ -724,10 +763,34 @@ namespace ModBrowser
             {
                 var currentField = GetSelectedCreateField();
                 bool shift = IsShiftHeld();
+                bool ctrl = IsCtrlHeld();
 
                 if (input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Back))
                 {
                     BackspaceSelectedCreateField();
+                    return false;
+                }
+
+                if (ctrl && input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.C))
+                {
+                    if (currentField != null && !string.IsNullOrEmpty(currentField.Value))
+                    {
+                        System.Windows.Forms.Clipboard.SetText(currentField.Value);
+                    }
+                    return false;
+                }
+
+                if (ctrl && input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.V))
+                {
+                    try
+                    {
+                        string pastedText = System.Windows.Forms.Clipboard.GetText();
+                        if (!string.IsNullOrEmpty(pastedText))
+                        {
+                            InsertIntoSelectedCreateField(pastedText);
+                        }
+                    }
+                    catch { }
                     return false;
                 }
 
@@ -900,7 +963,8 @@ namespace ModBrowser
             _refreshRect = new Rectangle(_installRect.Left - gap - bw, by, bw, 30);
             _createBuildRect = new Rectangle(_closeRect.Left - gap - 120, by, 120, 30);
             _createMoveToModsRect = new Rectangle(_closeRect.Left - gap - 120, by, 120, 30);
-            _createResetRect = new Rectangle(_createBuildRect.Left - gap - bw, by, bw, 30);
+            _createVisualStudioRect = new Rectangle(_createBuildRect.Left - gap - 90, by, 90, 30);
+            _createResetRect = new Rectangle(_createVisualStudioRect.Left - gap - bw, by, bw, 30);
             _createGenerateRect = new Rectangle(_createResetRect.Left - gap - bw, by, bw, 30);
             _createPublishRect = new Rectangle(_createGenerateRect.Left - gap - bw, by, bw, 30);
             _createSaveDraftRect = new Rectangle(_createPublishRect.Left - gap - bw, by, bw, 30);
@@ -1299,6 +1363,7 @@ namespace ModBrowser
             DrawButton(sb, _createPublishRect, "PUBLISH", new Color(66, 90, 136, 255));
             DrawButton(sb, _createGenerateRect, "MAKE A MOD", new Color(70, 118, 78, 255));
             DrawButton(sb, _createResetRect, "RESET", new Color(58, 65, 80, 255));
+            DrawButton(sb, _createVisualStudioRect, "OPEN VS", new Color(66, 100, 136, 255));
             if (_createShowTemplateTab)
             {
                 DrawButton(sb, _createMoveToModsRect, "Move it to !Mods", new Color(70, 100, 70, 255));
@@ -1448,6 +1513,37 @@ namespace ModBrowser
 
             DrawButton(sb, _buildModSelectorConfirmRect, "BUILD", new Color(70, 118, 78, 255));
             DrawButton(sb, _buildModSelectorCancelRect, "CANCEL", new Color(80, 58, 58, 255));
+        }
+
+        private void DrawCreateModWarningPrompt(SpriteBatch sb)
+        {
+            sb.Draw(_white, _panelRect, new Color(0, 0, 0, 170));
+
+            int panelW = 550;
+            int panelH = 200;
+            _createModWarningPanelRect = new Rectangle(_panelRect.Center.X - panelW / 2, _panelRect.Center.Y - panelH / 2, panelW, panelH);
+
+            sb.Draw(_white, _createModWarningPanelRect, new Color(21, 27, 36, 248));
+            DrawBorder(sb, _createModWarningPanelRect, new Color(255, 150, 0, 255));
+
+            var titlePos = new Vector2(_createModWarningPanelRect.Left + 16, _createModWarningPanelRect.Top + 14);
+            sb.DrawString(_smallFont, "⚠️ NOTICE", titlePos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, "⚠️ NOTICE", titlePos, new Color(255, 200, 0, 255));
+
+            var textPos = new Vector2(_createModWarningPanelRect.Left + 16, _createModWarningPanelRect.Top + 50);
+            string msg = "Create Mod is still being tested.";
+            string msg2 = "Don't expect it to work well.";
+            sb.DrawString(_smallFont, msg, textPos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, msg, textPos, new Color(210, 218, 230, 255));
+            sb.DrawString(_smallFont, msg2, textPos + new Vector2(0, _smallFont.LineSpacing + 4) + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, msg2, textPos + new Vector2(0, _smallFont.LineSpacing + 4), new Color(210, 218, 230, 255));
+
+            int buttonY = _createModWarningPanelRect.Bottom - 40;
+            _createModWarningOkButtonRect = new Rectangle(_createModWarningPanelRect.Left + 40, buttonY, 100, 28);
+            _createModWarningBackButtonRect = new Rectangle(_createModWarningPanelRect.Right - 140, buttonY, 100, 28);
+
+            DrawButton(sb, _createModWarningOkButtonRect, "OK", new Color(70, 118, 78, 255));
+            DrawButton(sb, _createModWarningBackButtonRect, "BACK", new Color(80, 58, 58, 255));
         }
 
         private void DrawPublishPrompt(SpriteBatch sb)
@@ -2183,26 +2279,28 @@ namespace ModBrowser
 
             int lineStep = _smallFont.LineSpacing + 2;
             int textLeft = _createEditorRect.Left + 8 + lineNumberWidth + 10;
-            int textRight = _createEditorRect.Right - 10;
+            int textWidth = _createEditorRect.Width - lineNumberWidth - 28;
+            int textRight = textLeft + textWidth;
             int maxVisibleLines = Math.Max(1, (_createEditorRect.Bottom - contentTop - 12) / lineStep);
 
             int lineIndex;
             int columnIndex;
             GetCaretLineAndColumn(rawText, _createCaretIndex, out lineIndex, out columnIndex);
-            if (lineIndex >= maxVisibleLines)
-                lineIndex = maxVisibleLines - 1;
-            if (lineIndex < 0)
-                lineIndex = 0;
+
+            // Check if caret is visible on screen
+            int visibleLineIndex = lineIndex - _createEditorScroll;
+            if (visibleLineIndex < 0 || visibleLineIndex >= maxVisibleLines)
+                return; // Caret is not visible
 
             string[] lines = SplitEditorLines(rawText);
-            string currentLine = lineIndex < lines.Length ? lines[lineIndex] : "";
+            string currentLine = lineIndex < lines.Length ? (lines[lineIndex] ?? "").Replace("\t", "    ") : "";
             if (columnIndex < 0)
                 columnIndex = 0;
             if (columnIndex > currentLine.Length)
                 columnIndex = currentLine.Length;
 
             string prefix = columnIndex > 0 ? currentLine.Substring(0, columnIndex) : "";
-            int lineY = contentTop + 4 + (lineIndex * lineStep);
+            int lineY = contentTop + 4 + (visibleLineIndex * lineStep);
             int caretX = textLeft + (int)_smallFont.MeasureString(prefix).X;
             if (caretX > textRight)
                 caretX = textRight;
@@ -2640,7 +2738,9 @@ namespace ModBrowser
 
         private static string GetCreatedModsRoot()
         {
-            return Path.Combine(Path.GetDirectoryName(typeof(ModBrowserScreen).Assembly.Location) ?? ".", "ModBrowser", "Created Mod");
+            // GetModsInstallRoot() returns the !Mods directory (parent of ModBrowser folder)
+            // So we append "Created Mod" to get the actual created mods directory
+            return Path.Combine(GetModsInstallRoot(), "Created Mod");
         }
 
         // ModBrowser.dll lives at {gameRoot}\!Mods\ModBrowser.dll in the Steam install.
@@ -3757,12 +3857,28 @@ using System.Runtime.InteropServices;
             if (string.IsNullOrEmpty(text)) return "";
             if (_smallFont.MeasureString(text).X <= width) return text;
             const string ell = "...";
-            for (int i = text.Length - 1; i > 0; i--)
+            float ellWidth = _smallFont.MeasureString(ell).X;
+            int availableWidth = width - (int)ellWidth;
+            if (availableWidth <= 0) return ell;
+
+            // Binary search for the longest substring that fits
+            int left = 0, right = text.Length;
+            int bestLength = 0;
+            while (left <= right)
             {
-                string t = text.Substring(0, i) + ell;
-                if (_smallFont.MeasureString(t).X <= width) return t;
+                int mid = (left + right) / 2;
+                float midWidth = _smallFont.MeasureString(text.Substring(0, mid)).X;
+                if (midWidth <= availableWidth)
+                {
+                    bestLength = mid;
+                    left = mid + 1;
+                }
+                else
+                {
+                    right = mid - 1;
+                }
             }
-            return ell;
+            return text.Substring(0, bestLength) + ell;
         }
 
         private void BeginRefresh()
@@ -4402,39 +4518,38 @@ using System.Runtime.InteropServices;
                     return;
                 }
 
-                // Create template folder
-                string templatePath = Path.Combine(_currentModRootPath, "template");
-                Directory.CreateDirectory(templatePath);
+                // Copy directly to game's !Mods folder to load as active mods
+                string gameModsPath = Path.Combine(GetGameInstallRoot(), "!Mods");
+                if (!Directory.Exists(gameModsPath))
+                {
+                    _status = "Game !Mods folder not found at: " + gameModsPath;
+                    _statusColor = Color.OrangeRed;
+                    return;
+                }
 
-                // Copy to template folder
+                int copied = 0;
                 foreach (string dllPath in dlls)
                 {
                     string fileName = Path.GetFileName(dllPath);
-                    string destPath = Path.Combine(templatePath, fileName);
-                    File.Copy(dllPath, destPath, true);
-                }
-
-                // Also try to copy to Steam install's !Mods\ModBrowser\Created Mod\<ModName>\
-                try
-                {
-                    string modName = _availableModFolders[_selectedModFolderIndex];
-                    string steamModRoot = Path.Combine(GetGameInstallRoot(), "!Mods", "ModBrowser", "Created Mod", modName);
-                    if (Directory.Exists(steamModRoot))
+                    string destPath = Path.Combine(gameModsPath, fileName);
+                    try
                     {
-                        string steamTemplatePath = Path.Combine(steamModRoot, "template");
-                        Directory.CreateDirectory(steamTemplatePath);
-                        foreach (string dllPath in dlls)
-                        {
-                            string fileName = Path.GetFileName(dllPath);
-                            string destPath = Path.Combine(steamTemplatePath, fileName);
-                            File.Copy(dllPath, destPath, true);
-                        }
+                        File.Copy(dllPath, destPath, true);
+                        copied++;
                     }
+                    catch { }
                 }
-                catch { }
 
-                _status = "Copied " + dlls.Length + " DLL(s) to template folder.";
-                _statusColor = Color.LightGreen;
+                if (copied > 0)
+                {
+                    _status = "Copied " + copied + " DLL(s) to !Mods. Restart or reload to activate.";
+                    _statusColor = Color.LightGreen;
+                }
+                else
+                {
+                    _status = "Failed to copy DLLs to !Mods folder.";
+                    _statusColor = Color.OrangeRed;
+                }
             }
             catch (Exception ex)
             {
@@ -4480,7 +4595,6 @@ using System.Runtime.InteropServices;
             _buildBusy = true;
             _buildCompleted = false;
             _buildSucceeded = false;
-            _buildPopupTitle = "Compiling Mod";
             _buildPopupMessage = "Starting MSBuild...";
             _buildLastWarningCount = 0;
             _buildLastErrorCount = 0;
@@ -4694,6 +4808,101 @@ using System.Runtime.InteropServices;
             catch { }
 
             return null;
+        }
+
+        private void LaunchVisualStudio()
+        {
+            try
+            {
+                // Ensure the list of created mods is refreshed
+                EnsureCreateTemplatesLoadedIfAny();
+
+                // Check if VS path is configured in config file
+                string vsPath = MBConfig.VisualStudioPath;
+
+                // If not configured, show warning once
+                if (string.IsNullOrWhiteSpace(vsPath))
+                {
+                    if (!MBConfig.VisualStudioWarningShown)
+                    {
+                        System.Windows.Forms.MessageBox.Show(
+                            "Please make sure you have Visual Studio path set in the ModBrowser config file before clicking on this button.\r\n\r\n" +
+                            "Set the 'VisualStudioPath' setting in your ModBrowser.Config.ini file.\r\n\r\n" +
+                            "Example: VisualStudioPath=C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe",
+                            "Visual Studio Path Not Configured",
+                            System.Windows.Forms.MessageBoxButtons.OK,
+                            System.Windows.Forms.MessageBoxIcon.Warning);
+
+                        MBConfig.VisualStudioWarningShown = true;
+                        MBConfig.Save();
+                    }
+                    _status = "Visual Studio path not configured. Please set it in ModBrowser.Config.ini";
+                    _statusColor = Color.Red;
+                    return;
+                }
+
+                // Try configured path first, then fall back to hardcoded paths
+                string[] visualStudioPaths = new[]
+                {
+                    vsPath,
+                    @"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\devenv.exe",
+                    @"C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\devenv.exe",
+                    @"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\devenv.exe",
+                    @"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\devenv.exe",
+                    @"C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\Common7\IDE\devenv.exe",
+                    @"C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\IDE\devenv.exe",
+                    @"C:\Program Files (x86)\Microsoft Visual Studio 14.0\Common7\IDE\devenv.exe"
+                };
+
+                foreach (var currentVsPath in visualStudioPaths)
+                {
+                    if (File.Exists(currentVsPath))
+                    {
+                        // Get the current mod folder (reconstruct full path like LoadModAtIndex does)
+                        if (_availableModFolders.Length > 0)
+                        {
+                            string modName = _availableModFolders[_selectedModFolderIndex];
+                            string modPath = Path.Combine(GetCreatedModsRoot(), modName);
+                            string solutionPath = Path.Combine(modPath, "*.sln");
+                            string[] slnFiles = Directory.GetFiles(modPath, "*.sln");
+                            string[] csprojFiles = Directory.GetFiles(modPath, "*.csproj");
+
+                            if (slnFiles.Length > 0)
+                            {
+                                Process.Start(currentVsPath, "\"" + slnFiles[0] + "\"");
+                                _status = "Opening Visual Studio...";
+                                _statusColor = Color.LightGreen;
+                            }
+                            else if (csprojFiles.Length > 0)
+                            {
+                                // Fall back to opening the .csproj file directly
+                                Process.Start(currentVsPath, "\"" + csprojFiles[0] + "\"");
+                                _status = "Opening Visual Studio...";
+                                _statusColor = Color.LightGreen;
+                            }
+                            else
+                            {
+                                _status = "No .sln or .csproj file found in mod folder.";
+                                _statusColor = Color.Red;
+                            }
+                        }
+                        else
+                        {
+                            _status = "No mod folder selected.";
+                            _statusColor = Color.Red;
+                        }
+                        return;
+                    }
+                }
+
+                _status = "Visual Studio not found.";
+                _statusColor = Color.Red;
+            }
+            catch (Exception ex)
+            {
+                _status = "Error launching Visual Studio: " + ex.Message;
+                _statusColor = Color.Red;
+            }
         }
     }
 }

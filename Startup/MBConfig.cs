@@ -11,6 +11,8 @@ namespace ModBrowser
         public static string CatalogUrl = CommunityCatalogUrl; // legacy alias
         public static string OfficialReleasesUrl = "https://github.com/RussDev7/CastleForge/releases"; // fallback only
         public static int HttpTimeoutSeconds = 15;
+        public static string VisualStudioPath = "";
+        public static bool VisualStudioWarningShown = false;
 
         private static string _configPath;
 
@@ -71,6 +73,14 @@ namespace ModBrowser
                         if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out t))
                             HttpTimeoutSeconds = Math.Max(5, Math.Min(120, t));
                     }
+                    else if (key.Equals("VisualStudioPath", StringComparison.OrdinalIgnoreCase))
+                        VisualStudioPath = val;
+                    else if (key.Equals("VisualStudioWarningShown", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool b;
+                        if (bool.TryParse(val, out b))
+                            VisualStudioWarningShown = b;
+                    }
                 }
             }
             catch
@@ -91,7 +101,9 @@ namespace ModBrowser
                     "OfficialCatalogUrl=" + OfficialCatalogUrl + "\r\n" +
                     "CatalogUrl=" + CommunityCatalogUrl + "\r\n" +
                     "OfficialReleasesUrl=" + OfficialReleasesUrl + "\r\n" +
-                    "HttpTimeoutSeconds=" + HttpTimeoutSeconds.ToString(CultureInfo.InvariantCulture) + "\r\n");
+                    "HttpTimeoutSeconds=" + HttpTimeoutSeconds.ToString(CultureInfo.InvariantCulture) + "\r\n" +
+                    "VisualStudioPath=" + VisualStudioPath + "\r\n" +
+                    "VisualStudioWarningShown=" + VisualStudioWarningShown.ToString(CultureInfo.InvariantCulture) + "\r\n");
             }
             catch
             {
