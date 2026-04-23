@@ -1,0 +1,14 @@
+{
+  "title": "CastleForge Catalog",
+  "mods": [
+    {
+      "id": "ModBrowser",
+      "name": "Mod Browser",
+      "author": "unknowghost",
+      "version": "2.1.0",
+      "description": "A comprehensive mod management browser for CastleForge",
+      "dll_url": "https://github.com/unknowghost0/mod-browser/releases/tag/mod_browser/ModBrowser.dll",
+      "page_url": "https://github.com/unknowghost0/mod-browser"
+    }
+  ]
+}
