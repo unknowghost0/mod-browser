@@ -40,7 +40,7 @@ When you install a mod or press `UPDATE ALL`:
 4. The game shows a one-button `OK` prompt.
 5. Pressing `OK` opens a visible updater console and closes the game.
 6. The updater waits for `CastleMinerZ.exe` to close.
-7. It extracts `.zip` packages and copies `.dll`, `.json`, `.ini`, `.txt`, and `.md` files into `!Mods`.
+7. It extracts `.zip` packages and copies files into `!Mods`.
 8. It restarts CastleMiner Z.
 9. The console closes itself after the game starts.
 
