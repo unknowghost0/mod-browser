@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -106,8 +107,11 @@ namespace ModBrowser
         private Rectangle _createModViewRect;
         private Rectangle _backToBrowserRect;
         private Rectangle _refreshRect;
+        private Rectangle _updateAllRect;
         private Rectangle _installRect;
         private Rectangle _closeRect;
+        private Rectangle _githubPageRect;
+        private Rectangle _videoPageRect;
         private Rectangle _createEditorRect;
         private Rectangle _createInfoRect;
         private Rectangle _createFieldFilterRect;
@@ -144,7 +148,7 @@ namespace ModBrowser
         private Rectangle _buildModSelectorConfirmRect;
         private Rectangle _buildModSelectorCancelRect;
         private BrowserViewMode _viewMode = BrowserViewMode.Browser;
-        private BrowserSourceMode _sourceMode = BrowserSourceMode.All;
+        private BrowserSourceMode _sourceMode = BrowserSourceMode.Official;
         private readonly List<CreateModField> _createFields = new List<CreateModField>();
         private readonly List<CreateModField> _createCodeFields = new List<CreateModField>();
         private string[] _availableModFolders = new string[0];
@@ -174,14 +178,22 @@ namespace ModBrowser
         private int _buildLastWarningCount;
         private int _buildLastErrorCount;
         private List<string> _buildDiagLines = new List<string>();
+        private List<string> _buildOutputLines = new List<string>();
+        private string _buildLastProjectPath = "";
+        private string _buildLastOutputLogPath = "";
+        private int _buildOutputScroll;
         private bool _showBuildModSelectorPrompt;
         private string[] _buildModSelectorOptions = new string[0];
         private int _buildModSelectorSelectedIndex;
-        private bool _downloadedAnyThisSession;
-        private bool _showReloadNoticePrompt;
+        private bool _showExternalUpdaterPrompt;
+        private string _pendingUpdaterBatPath = "";
+        private string _externalUpdaterPromptTitle = "Update Ready";
+        private string _pendingUpdaterMessage = "";
+        private Rectangle _externalUpdaterPromptPanelRect;
+        private Rectangle _externalUpdaterPromptOkRect;
         private volatile bool _loading;
         private volatile bool _installing;
-        private string _status = "Press REFRESH to load catalog.";
+        private string _status = "Press CHECK UPDATES to load catalog.";
         private Color _statusColor = Color.LightGray;
         private bool _showCreateModWarning;
         private Rectangle _createModWarningPanelRect;
@@ -191,6 +203,7 @@ namespace ModBrowser
         private readonly Dictionary<string, Texture2D> _previewCache = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, byte[]> _previewByteCache = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _previewDownloadsInFlight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _modsWithUpdates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string _previewRequestedUrl;
         private string _previewLoadedUrl;
         private string _previewFailedUrl;
@@ -212,11 +225,14 @@ namespace ModBrowser
         {
             base.OnPushed();
             IsOpen = true;
-            _downloadedAnyThisSession = false;
-            _showReloadNoticePrompt = false;
+            _showExternalUpdaterPrompt = false;
+            _pendingUpdaterBatPath = "";
+            _externalUpdaterPromptTitle = "Update Ready";
+            _pendingUpdaterMessage = "";
             _showPublishPrompt = false;
             EnsureCreateTemplatesLoadedIfAny();
             BeginRefresh();
+            ThreadPool.QueueUserWorkItem(_ => VerifyInstalledVersions());
         }
 
         public override void OnPoped()
@@ -226,7 +242,6 @@ namespace ModBrowser
             CaptureMouse = false;
             if (_previewTexture != null)
             {
-                _previewTexture.Dispose();
                 _previewTexture = null;
             }
             foreach (var kv in _previewCache)
@@ -249,18 +264,20 @@ namespace ModBrowser
 
             spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, null, null);
             spriteBatch.Draw(_white, Screen.Adjuster.ScreenRect, new Color(0, 0, 0, 190));
-            spriteBatch.Draw(_white, _panelRect, new Color(18, 21, 27, 235));
-            DrawBorder(spriteBatch, _panelRect, new Color(84, 115, 164, 255));
+            spriteBatch.Draw(_white, _panelRect, new Color(13, 17, 24, 242));
+            DrawBorder(spriteBatch, _panelRect, new Color(74, 106, 158, 255));
 
             var titlePos = new Vector2(_panelRect.Left + 20, _panelRect.Top + 16);
             spriteBatch.DrawString(_titleFont, "Mod Browser", titlePos + new Vector2(1, 1), Color.Black);
             spriteBatch.DrawString(_titleFont, "Mod Browser", titlePos, Color.White);
 
-            spriteBatch.Draw(_white, _leftRect, new Color(26, 31, 39, 255));
-            spriteBatch.Draw(_white, _rightRect, new Color(26, 31, 39, 255));
+            spriteBatch.Draw(_white, _leftRect, new Color(20, 25, 34, 255));
+            spriteBatch.Draw(_white, new Rectangle(_leftRect.Left, _leftRect.Top, _leftRect.Width, 42), new Color(29, 38, 53, 255));
+            spriteBatch.Draw(_white, _rightRect, new Color(17, 22, 31, 255));
+            spriteBatch.Draw(_white, new Rectangle(_rightRect.Left, _rightRect.Top, _rightRect.Width, 42), new Color(24, 32, 46, 255));
             spriteBatch.Draw(_white, _statusRect, new Color(20, 24, 31, 255));
-            DrawBorder(spriteBatch, _leftRect, new Color(62, 75, 95, 255));
-            DrawBorder(spriteBatch, _rightRect, new Color(62, 75, 95, 255));
+            DrawBorder(spriteBatch, _leftRect, new Color(54, 76, 112, 255));
+            DrawBorder(spriteBatch, _rightRect, new Color(54, 76, 112, 255));
             DrawBorder(spriteBatch, _statusRect, new Color(62, 75, 95, 255));
 
             DrawViewModeButtons(spriteBatch);
@@ -268,7 +285,7 @@ namespace ModBrowser
             {
                 DrawButtons(spriteBatch);
                 DrawList(spriteBatch);
-                DrawDetails(spriteBatch);
+                DrawDetails(spriteBatch, gameTime);
             }
             else
             {
@@ -276,8 +293,8 @@ namespace ModBrowser
             }
             DrawStatus(spriteBatch);
             ConsumePendingPreview(device);
-            if (_showReloadNoticePrompt)
-                DrawReloadNoticePrompt(spriteBatch);
+            if (_showExternalUpdaterPrompt)
+                DrawExternalUpdaterPrompt(spriteBatch);
             if (_showBuildModSelectorPrompt)
                 DrawBuildModSelectorPrompt(spriteBatch);
             if (_showCreateModWarning)
@@ -309,33 +326,12 @@ namespace ModBrowser
             bool leftPressed = mouse.LeftButtonPressed || (leftDown && !_mouseLeftWasDown);
             _mouseLeftWasDown = leftDown;
 
-            if (_showReloadNoticePrompt)
+            if (_showExternalUpdaterPrompt)
             {
-                if (leftPressed)
+                if ((leftPressed && _externalUpdaterPromptOkRect.Contains(point)) ||
+                    input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Enter))
                 {
-                    if (_reloadNoticeCloseRect.Contains(point))
-                    {
-                        // Note: RequestReload no longer exists in new ModManager (DLLs hooked to memory)
-                        PopMe();
-                        return false;
-                    }
-
-                    if (_reloadNoticeStayRect.Contains(point))
-                    {
-                        _showReloadNoticePrompt = false;
-                        return false;
-                    }
-                }
-
-                if (input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Enter))
-                {
-                    // Note: RequestReload no longer exists in new ModManager (DLLs hooked to memory)
-                    PopMe();
-                    return false;
-                }
-                if (input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Escape))
-                {
-                    _showReloadNoticePrompt = false;
+                    LaunchPendingUpdaterAndExitGame();
                     return false;
                 }
 
@@ -377,6 +373,33 @@ namespace ModBrowser
 
             if (_showBuildModSelectorPrompt)
             {
+                if (leftPressed)
+                {
+                    if (_buildModSelectorConfirmRect.Contains(point))
+                    {
+                        _showBuildModSelectorPrompt = false;
+                        ConfirmBuildModSelection();
+                        return false;
+                    }
+
+                    if (_buildModSelectorCancelRect.Contains(point))
+                    {
+                        _showBuildModSelectorPrompt = false;
+                        _status = "Build canceled.";
+                        _statusColor = Color.LightGray;
+                        return false;
+                    }
+
+                    int rowH = 26;
+                    int listTop = _buildModSelectorPanelRect.Top + 50;
+                    int row = (point.Y - listTop) / rowH;
+                    if (row >= 0 && row < _buildModSelectorOptions.Length)
+                    {
+                        _buildModSelectorSelectedIndex = row;
+                        return false;
+                    }
+                }
+
                 if (input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Up) && _buildModSelectorSelectedIndex > 0)
                     _buildModSelectorSelectedIndex--;
                 if (input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Down) && _buildModSelectorSelectedIndex < _buildModSelectorOptions.Length - 1)
@@ -437,11 +460,21 @@ namespace ModBrowser
             if (_showBuildPopup)
             {
                 if (_buildCompleted && leftPressed && _buildPopupOkRect.Contains(point))
+                {
                     _showBuildPopup = false;
+                    _createShowTemplateTab = true;
+                    return false;
+                }
                 if (_buildCompleted && input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Enter))
+                {
                     _showBuildPopup = false;
+                    _createShowTemplateTab = true;
+                }
                 if (_buildCompleted && input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Escape))
+                {
                     _showBuildPopup = false;
+                    _createShowTemplateTab = true;
+                }
                 return false;
             }
 
@@ -537,7 +570,7 @@ namespace ModBrowser
                     {
                         if (_createSaveDraftRect.Contains(point))
                         {
-                            SaveCreateModDraft();
+                            SaveSelectedCreateModFiles();
                             return false;
                         }
                         if (_createPublishRect.Contains(point))
@@ -553,7 +586,10 @@ namespace ModBrowser
                         if (_createResetRect.Contains(point))
                         {
                             ResetCreateModFields();
-                            _status = "Create Mod fields reset.";
+                            _createCodeFields.Clear();
+                            _currentModRootPath = "";
+                            _selectedModFolderIndex = -1;
+                            _status = "Create Mod selection cleared.";
                             _statusColor = Color.LightGreen;
                             return false;
                         }
@@ -562,12 +598,12 @@ namespace ModBrowser
                             LaunchVisualStudio();
                             return false;
                         }
-                        if (_createMoveToModsRect.Contains(point) && _createShowTemplateTab)
+                        if (_createBuildRect.Contains(point) && _createShowTemplateTab)
                         {
                             MoveCompiledModsToSteamMods();
                             return false;
                         }
-                        if (_createBuildRect.Contains(point) && !_createShowTemplateTab)
+                        if (_createBuildRect.Contains(point))
                         {
                             TryStartBuild();
                             return false;
@@ -575,16 +611,16 @@ namespace ModBrowser
                         if (_createFieldsTabRect.Contains(point))
                         {
                             _createShowTemplateTab = false;
-                            RebuildVisibleCreateFieldIndices(); // Update indices for Mod Files tab.
+                            RebuildVisibleCreateFieldIndices();
                             return false;
                         }
                         if (_createTemplateTabRect.Contains(point))
                         {
                             _createShowTemplateTab = true;
-                            RebuildVisibleCreateFieldIndices(); // Update indices for Template tab.
+                            RebuildVisibleCreateFieldIndices();
                             return false;
                         }
-                        if (_createEditorRect.Contains(point))
+                        if (_createEditorRect.Contains(point) && !_createShowTemplateTab)
                         {
                             _focusCreateEditor = true;
                             _focusCreateFieldFilter = false;
@@ -612,33 +648,17 @@ namespace ModBrowser
                             _focusCreateFieldFilter = false;
                             _focusCreateEditorSearch = false;
 
-                            int rowH = Math.Max(32, _smallFont.LineSpacing + 10);
-                            int listTop = _createFieldFilterRect.Bottom + 6;
+                            int rowH = Math.Max(24, _smallFont.LineSpacing + 6);
+                            int listTop = _createFieldFilterRect.Bottom + 7 + 26 + 6;
                             int row = (point.Y - listTop) / rowH;
-                            if (_viewMode == BrowserViewMode.CreateMod)
-                            {
-                                if (row == 0)
-                                {
-                                    _createGroupExpanded = !_createGroupExpanded;
-                                    return false;
-                                }
-                                if (_createGroupExpanded)
-                                {
-                                    int fileRow = row - 1;
-                                    if (fileRow >= 0 && fileRow < _visibleCreateFieldIndices.Count)
-                                    {
-                                        SetSelectedCreateField(_visibleCreateFieldIndices[fileRow]);
-                                        _focusCreateEditor = true;
-                                    }
-                                }
-                            }
+                            HandleCreateListClick(row);
                             return false;
                         }
                     }
 
                     if (_closeRect.Contains(point))
                     {
-                        RequestCloseOrShowReloadPrompt();
+                        PopMe();
                         return false;
                     }
                     return false;
@@ -649,6 +669,11 @@ namespace ModBrowser
                     BeginRefresh();
                     return false;
                 }
+                if (_updateAllRect.Contains(point))
+                {
+                    BeginUpdateAll();
+                    return false;
+                }
                 if (_installRect.Contains(point))
                 {
                     BeginInstallSelected();
@@ -656,18 +681,22 @@ namespace ModBrowser
                 }
                 if (_closeRect.Contains(point))
                 {
-                    RequestCloseOrShowReloadPrompt();
+                    PopMe();
+                    return false;
+                }
+                if (_githubPageRect.Contains(point))
+                {
+                    OpenSelectedModPage();
+                    return false;
+                }
+                if (_videoPageRect.Contains(point))
+                {
+                    OpenSelectedModVideo();
                     return false;
                 }
                 if (_searchRect.Contains(point))
                 {
                     _focusSearch = true;
-                    return false;
-                }
-                if (_sourceAllRect.Contains(point))
-                {
-                    _sourceMode = BrowserSourceMode.All;
-                    ApplySourceFilter();
                     return false;
                 }
                 if (_sourceOfficialRect.Contains(point))
@@ -685,7 +714,7 @@ namespace ModBrowser
                 if (_leftRect.Contains(point))
                 {
                     _focusSearch = false;
-                    int rowH = _smallFont.LineSpacing + 10;
+                    int rowH = Math.Max(34, _smallFont.LineSpacing + 12);
                     int listTop = GetBrowserListTop();
                     int row = (point.Y - listTop) / rowH;
                     int vis = _scroll + row;
@@ -702,27 +731,40 @@ namespace ModBrowser
             if (_viewMode == BrowserViewMode.Browser && wheel != 0 && _leftRect.Contains(point))
             {
                 _scroll += wheel > 0 ? -1 : 1;
-                int visibleRows = GetBrowserVisibleRows(_smallFont.LineSpacing + 10);
+                int visibleRows = GetBrowserVisibleRows(Math.Max(34, _smallFont.LineSpacing + 12));
                 int maxScroll = Math.Max(0, _visibleIndices.Count - visibleRows);
                 if (_scroll < 0) _scroll = 0;
                 if (_scroll > maxScroll) _scroll = maxScroll;
             }
             if (_viewMode == BrowserViewMode.CreateMod && wheel != 0 && _createEditorRect.Contains(point))
             {
-                _createEditorScroll += wheel > 0 ? -3 : 3;
-                var scrollField = GetSelectedCreateField();
-                if (scrollField != null)
+                if (_createShowTemplateTab)
                 {
-                    string[] scrollLines = SplitEditorLines(scrollField.Value ?? "");
-                    int lineStep = _smallFont.LineSpacing + 2;
-                    int maxVis = Math.Max(1, (_createEditorRect.Height - 16) / lineStep);
-                    int maxEditorScroll = Math.Max(0, scrollLines.Length - maxVis);
-                    if (_createEditorScroll < 0) _createEditorScroll = 0;
-                    if (_createEditorScroll > maxEditorScroll) _createEditorScroll = maxEditorScroll;
+                    _buildOutputScroll += wheel > 0 ? -3 : 3;
+                    int lineStep = _smallFont.LineSpacing + 3;
+                    int maxVis = Math.Max(1, (_createEditorRect.Height - 70) / lineStep);
+                    int total = Math.Max(1, GetBuildOutputDisplayLines().Count);
+                    int maxScroll = Math.Max(0, total - maxVis);
+                    if (_buildOutputScroll < 0) _buildOutputScroll = 0;
+                    if (_buildOutputScroll > maxScroll) _buildOutputScroll = maxScroll;
                 }
                 else
                 {
-                    if (_createEditorScroll < 0) _createEditorScroll = 0;
+                    _createEditorScroll += wheel > 0 ? -3 : 3;
+                    var scrollField = GetSelectedCreateField();
+                    if (scrollField != null)
+                    {
+                        string[] scrollLines = SplitEditorLines(scrollField.Value ?? "");
+                        int lineStep = _smallFont.LineSpacing + 2;
+                        int maxVis = Math.Max(1, (_createEditorRect.Height - 16) / lineStep);
+                        int maxEditorScroll = Math.Max(0, scrollLines.Length - maxVis);
+                        if (_createEditorScroll < 0) _createEditorScroll = 0;
+                        if (_createEditorScroll > maxEditorScroll) _createEditorScroll = maxEditorScroll;
+                    }
+                    else
+                    {
+                        if (_createEditorScroll < 0) _createEditorScroll = 0;
+                    }
                 }
             }
 
@@ -743,18 +785,9 @@ namespace ModBrowser
 
             if (_viewMode == BrowserViewMode.CreateMod)
             {
-                // Mod switching with Ctrl+Left/Right
-                bool ctrl = IsCtrlHeld();
-                if (ctrl && input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Left) && _availableModFolders.Length > 1)
+                if (input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.F5))
                 {
-                    if (_selectedModFolderIndex > 0)
-                        LoadModAtIndex(_selectedModFolderIndex - 1);
-                    return false;
-                }
-                if (ctrl && input.Keyboard.WasKeyPressed(Microsoft.Xna.Framework.Input.Keys.Right) && _availableModFolders.Length > 1)
-                {
-                    if (_selectedModFolderIndex < _availableModFolders.Length - 1)
-                        LoadModAtIndex(_selectedModFolderIndex + 1);
+                    RefreshCreatedModFolders(true);
                     return false;
                 }
             }
@@ -942,12 +975,12 @@ namespace ModBrowser
             _leftRect = new Rectangle(panelX + 18, contentTop, leftW, contentH);
             _rightRect = new Rectangle(_leftRect.Right + 14, contentTop, panelW - leftW - 50, contentH);
             _statusRect = new Rectangle(panelX + 18, contentBottom + 8, panelW - 36, 34);
-            int sourceTabGap = 4;
-            int sourceTabW = Math.Max(72, (_leftRect.Width - 14 - (sourceTabGap * 2)) / 3);
-            _sourceAllRect = new Rectangle(_leftRect.Left + 6, _leftRect.Top + 6, sourceTabW, _smallFont.LineSpacing + 8);
-            _sourceOfficialRect = new Rectangle(_sourceAllRect.Right + sourceTabGap, _sourceAllRect.Top, sourceTabW, _sourceAllRect.Height);
-            _sourceCommunityRect = new Rectangle(_sourceOfficialRect.Right + sourceTabGap, _sourceAllRect.Top, sourceTabW, _sourceAllRect.Height);
-            _searchRect = new Rectangle(_leftRect.Left + 6, _sourceAllRect.Bottom + 6, _leftRect.Width - 12, _smallFont.LineSpacing + 6);
+            int sourceTabGap = 8;
+            int sourceTabW = Math.Max(100, (_leftRect.Width - 20 - sourceTabGap) / 2);
+            _sourceAllRect = Rectangle.Empty;
+            _sourceOfficialRect = new Rectangle(_leftRect.Left + 10, _leftRect.Top + 8, sourceTabW, 30);
+            _sourceCommunityRect = new Rectangle(_sourceOfficialRect.Right + sourceTabGap, _sourceOfficialRect.Top, sourceTabW, _sourceOfficialRect.Height);
+            _searchRect = new Rectangle(_leftRect.Left + 10, _sourceOfficialRect.Bottom + 10, _leftRect.Width - 20, Math.Max(26, _smallFont.LineSpacing + 10));
             int modeY = panelY + 20;
             int modeW = 126;
             int modeGap = 8;
@@ -960,7 +993,8 @@ namespace ModBrowser
             int gap = 10;
             _closeRect = new Rectangle(panelX + panelW - 18 - bw, by, bw, 30);
             _installRect = new Rectangle(_closeRect.Left - gap - bw, by, bw, 30);
-            _refreshRect = new Rectangle(_installRect.Left - gap - bw, by, bw, 30);
+            _updateAllRect = new Rectangle(_installRect.Left - gap - bw, by, bw, 30);
+            _refreshRect = new Rectangle(_updateAllRect.Left - gap - bw, by, bw, 30);
             _createBuildRect = new Rectangle(_closeRect.Left - gap - 120, by, 120, 30);
             _createMoveToModsRect = new Rectangle(_closeRect.Left - gap - 120, by, 120, 30);
             _createVisualStudioRect = new Rectangle(_createBuildRect.Left - gap - 90, by, 90, 30);
@@ -1000,6 +1034,8 @@ namespace ModBrowser
             _reloadNoticePanelRect = new Rectangle(_panelRect.Center.X - (noticeW / 2), _panelRect.Center.Y - (noticeH / 2), noticeW, noticeH);
             _reloadNoticeCloseRect = new Rectangle(_reloadNoticePanelRect.Right - 16 - 150, _reloadNoticePanelRect.Bottom - 16 - 34, 150, 34);
             _reloadNoticeStayRect = new Rectangle(_reloadNoticeCloseRect.Left - 10 - 130, _reloadNoticeCloseRect.Top, 130, 34);
+            _externalUpdaterPromptPanelRect = _reloadNoticePanelRect;
+            _externalUpdaterPromptOkRect = new Rectangle(_externalUpdaterPromptPanelRect.Center.X - 65, _externalUpdaterPromptPanelRect.Bottom - 16 - 34, 130, 34);
 
             int publishW = Math.Min(680, _panelRect.Width - 120);
             int publishH = 170;
@@ -1031,8 +1067,12 @@ namespace ModBrowser
 
         private void DrawButtons(SpriteBatch sb)
         {
-            DrawButton(sb, _refreshRect, _loading ? "REFRESHING..." : "REFRESH", new Color(58, 65, 80, 255));
-            DrawButton(sb, _installRect, _installing ? "DOWNLOADING..." : "DOWNLOAD", new Color(70, 118, 78, 255));
+            DrawButton(sb, _refreshRect, _loading ? "CHECKING..." : "CHECK UPDATES", new Color(58, 65, 80, 255));
+            DrawButton(sb, _updateAllRect, _installing ? "UPDATING..." : "UPDATE ALL", new Color(160, 103, 42, 255));
+            bool updateAvailable = _selectedIndex >= 0 && _selectedIndex < _mods.Count && IsUpdateCached(_mods[_selectedIndex]);
+            string installText = _installing ? "DOWNLOADING..." : updateAvailable ? "UPDATE" : "DOWNLOAD";
+            Color installColor = updateAvailable ? new Color(190, 130, 45, 255) : new Color(70, 118, 78, 255);
+            DrawButton(sb, _installRect, installText, installColor);
             DrawButton(sb, _closeRect, "CLOSE", new Color(80, 58, 58, 255));
         }
 
@@ -1055,23 +1095,18 @@ namespace ModBrowser
 
         private void DrawList(SpriteBatch sb)
         {
-            DrawModeButton(sb, _sourceAllRect, "ALL", _sourceMode == BrowserSourceMode.All);
-            DrawModeButton(sb, _sourceOfficialRect, "OFFICIAL", _sourceMode == BrowserSourceMode.Official);
-            DrawModeButton(sb, _sourceCommunityRect, "COMMUNITY", _sourceMode == BrowserSourceMode.Community);
+            DrawSourceTab(sb, _sourceOfficialRect, "OFFICIAL", _sourceMode == BrowserSourceMode.Official);
+            DrawSourceTab(sb, _sourceCommunityRect, "COMMUNITY", _sourceMode == BrowserSourceMode.Community);
 
-            var headerPos = new Vector2(_leftRect.Left + 10, _sourceAllRect.Bottom + 16);
-            sb.DrawString(_smallFont, "Catalog Mods", headerPos + new Vector2(1, 1), Color.Black);
-            sb.DrawString(_smallFont, "Catalog Mods", headerPos, Color.White);
-
-            sb.Draw(_white, _searchRect, _focusSearch ? new Color(34, 45, 62, 255) : new Color(20, 27, 37, 255));
-            DrawBorder(sb, _searchRect, new Color(86, 112, 154, 255));
-            string searchDisplay = string.IsNullOrWhiteSpace(_searchText) ? "Find..." : _searchText;
+            sb.Draw(_white, _searchRect, _focusSearch ? new Color(31, 43, 62, 255) : new Color(14, 20, 30, 255));
+            DrawBorder(sb, _searchRect, _focusSearch ? new Color(116, 156, 220, 255) : new Color(58, 82, 120, 255));
+            string searchDisplay = string.IsNullOrWhiteSpace(_searchText) ? "Search" : _searchText;
             Color searchColor = string.IsNullOrWhiteSpace(_searchText) ? new Color(150, 160, 176, 255) : Color.White;
-            var searchPos = new Vector2(_searchRect.Left + 6, _searchRect.Top + 2);
-            sb.DrawString(_smallFont, Clip(searchDisplay, _searchRect.Width - 10), searchPos + new Vector2(1, 1), Color.Black);
-            sb.DrawString(_smallFont, Clip(searchDisplay, _searchRect.Width - 10), searchPos, searchColor);
+            var searchPos = new Vector2(_searchRect.Left + 10, _searchRect.Top + 5);
+            sb.DrawString(_smallFont, Clip(searchDisplay, _searchRect.Width - 20), searchPos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, Clip(searchDisplay, _searchRect.Width - 20), searchPos, searchColor);
 
-            int rowH = _smallFont.LineSpacing + 10;
+            int rowH = Math.Max(34, _smallFont.LineSpacing + 12);
             int y = GetBrowserListTop();
             int visibleRows = GetBrowserVisibleRows(rowH);
             for (int i = 0; i < visibleRows; i++)
@@ -1080,40 +1115,58 @@ namespace ModBrowser
                 if (vis >= _visibleIndices.Count) break;
                 int idx = _visibleIndices[vis];
 
-                var row = new Rectangle(_leftRect.Left + 6, y, _leftRect.Width - 12, rowH);
+                var row = new Rectangle(_leftRect.Left + 10, y, _leftRect.Width - 20, rowH - 4);
                 bool sel = idx == _selectedIndex;
-                sb.Draw(_white, row, sel ? new Color(70, 98, 145, 255) : new Color(30, 36, 45, 255));
+                sb.Draw(_white, row, sel ? new Color(59, 91, 143, 255) : new Color(24, 31, 42, 255));
+                DrawBorder(sb, row, sel ? new Color(124, 166, 230, 255) : new Color(35, 48, 68, 255));
 
                 string name = _mods[idx].Name ?? _mods[idx].Id ?? "Unknown";
                 string ver = (_mods[idx].Version ?? "").Trim();
                 string line = name;
                 if (!string.IsNullOrWhiteSpace(ver))
                     line = name + "  [" + ver + "]";
-                line = Clip(line, _leftRect.Width - 28);
-                var p = new Vector2(row.Left + 8, row.Top + 4);
+                if (IsUpdateCached(_mods[idx]))
+                    line += "  UPDATE";
+                line = Clip(line, row.Width - 20);
+                var p = new Vector2(row.Left + 10, row.Top + 5);
                 sb.DrawString(_smallFont, line, p + new Vector2(1, 1), Color.Black);
-                sb.DrawString(_smallFont, line, p, Color.White);
+                sb.DrawString(_smallFont, line, p, sel ? Color.White : new Color(218, 226, 238, 255));
                 y += rowH;
             }
 
             if (_visibleIndices.Count == 0 && !_loading)
             {
-                var p = new Vector2(_leftRect.Left + 10, _leftRect.Top + 62);
+                var p = new Vector2(_leftRect.Left + 14, GetBrowserListTop() + 8);
                 string msg = _mods.Count == 0 ? "No mods found in catalog." : "No mods match search.";
                 sb.DrawString(_smallFont, msg, p + new Vector2(1, 1), Color.Black);
                 sb.DrawString(_smallFont, msg, p, Color.LightGray);
             }
         }
 
-        private void DrawDetails(SpriteBatch sb)
+        private void DrawSourceTab(SpriteBatch sb, Rectangle rect, string text, bool active)
         {
-            var headerPos = new Vector2(_rightRect.Left + 10, _rightRect.Top + 8);
-            sb.DrawString(_smallFont, "Details", headerPos + new Vector2(1, 1), Color.Black);
-            sb.DrawString(_smallFont, "Details", headerPos, Color.White);
+            Color fill = active ? new Color(54, 91, 148, 255) : new Color(17, 24, 35, 255);
+            Color border = active ? new Color(132, 172, 235, 255) : new Color(62, 82, 116, 255);
+            sb.Draw(_white, rect, fill);
+            if (active)
+                sb.Draw(_white, new Rectangle(rect.Left, rect.Bottom - 3, rect.Width, 3), new Color(128, 180, 255, 255));
+            DrawBorder(sb, rect, border);
+
+            var size = _smallFont.MeasureString(text);
+            var pos = new Vector2(rect.Center.X - size.X / 2f, rect.Center.Y - size.Y / 2f);
+            sb.DrawString(_smallFont, text, pos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, text, pos, active ? Color.White : new Color(178, 190, 210, 255));
+        }
+
+        private void DrawDetails(SpriteBatch sb, GameTime gameTime)
+        {
+            var headerPos = new Vector2(_rightRect.Left + 14, _rightRect.Top + 10);
+            sb.DrawString(_smallFont, "SELECTED MOD", headerPos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, "SELECTED MOD", headerPos, new Color(220, 232, 248, 255));
 
             if (_selectedIndex < 0 || _selectedIndex >= _mods.Count)
             {
-                var p0 = new Vector2(_rightRect.Left + 10, _rightRect.Top + 38);
+                var p0 = new Vector2(_rightRect.Left + 18, _rightRect.Top + 64);
                 sb.DrawString(_smallFont, "Select a mod from the left list.", p0 + new Vector2(1, 1), Color.Black);
                 sb.DrawString(_smallFont, "Select a mod from the left list.", p0, Color.LightGray);
                 return;
@@ -1121,112 +1174,200 @@ namespace ModBrowser
 
             var m = _mods[_selectedIndex];
             EnsurePreviewRequested(m);
-            int y = _rightRect.Top + 38;
-            DrawDetailLine(sb, "Name", m.Name, ref y);
-            DrawDetailLine(sb, "Author", m.Author, ref y);
-            DrawDetailLine(sb, "Version", m.Version, ref y);
-            if (!string.IsNullOrWhiteSpace(m.DllUrl))
-                DrawDetailLine(sb, "DLL URL", m.DllUrl, ref y);
+
+            int pad = 10;
+            int previewHeight = Math.Max(190, (int)(_rightRect.Height * 0.54f));
+            var previewRect = new Rectangle(_rightRect.Left + pad, _rightRect.Top + 44, _rightRect.Width - (pad * 2), previewHeight);
+            DrawPreview(sb, m, previewRect, gameTime);
+
+            int detailsTop = previewRect.Bottom + 10;
+            int detailsHeight = Math.Max(92, _rightRect.Bottom - detailsTop - 10);
+            int leftInfoW = Math.Max(250, (int)((_rightRect.Width - 30) * 0.46f));
+            var summaryRect = new Rectangle(_rightRect.Left + pad, detailsTop, leftInfoW, detailsHeight);
+            var descRect = new Rectangle(summaryRect.Right + 10, detailsTop, _rightRect.Right - summaryRect.Right - 20, detailsHeight);
+            _githubPageRect = Rectangle.Empty;
+            _videoPageRect = Rectangle.Empty;
+
+            string name = string.IsNullOrWhiteSpace(m.Name) ? (m.Id ?? "Unknown Mod") : m.Name;
+            sb.Draw(_white, summaryRect, new Color(18, 25, 36, 255));
+            DrawBorder(sb, summaryRect, new Color(49, 72, 108, 255));
+            sb.Draw(_white, new Rectangle(summaryRect.Left + 1, summaryRect.Top + 1, 4, summaryRect.Height - 2), m.Official ? new Color(96, 154, 230, 255) : new Color(118, 190, 135, 255));
+            var namePos = new Vector2(summaryRect.Left + 16, summaryRect.Top + 12);
+            sb.DrawString(_smallFont, Clip(name, summaryRect.Width - 32), namePos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, Clip(name, summaryRect.Width - 32), namePos, Color.White);
+
+            DrawDetailBadge(sb, new Rectangle(summaryRect.Left + 16, summaryRect.Top + _smallFont.LineSpacing + 22, 126, 24), m.Official ? "OFFICIAL" : "COMMUNITY", m.Official ? new Color(72, 112, 178, 255) : new Color(76, 132, 88, 255));
+            int metaY = summaryRect.Top + _smallFont.LineSpacing + 54;
+            DrawDetailMetaText(sb, new Vector2(summaryRect.Left + 16, metaY), "Author", m.Author, summaryRect.Width - 32);
+            string versionText = IsCatalogTypeValue(m.Version) ? "" : m.Version;
+            if (!string.IsNullOrWhiteSpace(versionText))
+                DrawDetailMetaText(sb, new Vector2(summaryRect.Left + 16, metaY + _smallFont.LineSpacing + 4), "Version", versionText, summaryRect.Width - 32);
+
+            int buttonY = metaY + (_smallFont.LineSpacing * 2) + 12;
+            int buttonX = summaryRect.Left + 16;
             if (!string.IsNullOrWhiteSpace(m.PageUrl))
-                DrawDetailLine(sb, "Page URL", m.PageUrl, ref y);
+            {
+                _githubPageRect = new Rectangle(buttonX, buttonY, Math.Min(110, summaryRect.Width - 32), 28);
+                DrawButton(sb, _githubPageRect, "GITHUB", new Color(60, 91, 143, 255));
+                buttonX = _githubPageRect.Right + 8;
+            }
+            string videoUrl = GetSelectedModVideoUrl(m);
+            if (!string.IsNullOrWhiteSpace(videoUrl))
+            {
+                int videoW = Math.Min(100, summaryRect.Right - buttonX - 16);
+                if (videoW < 72)
+                {
+                    buttonX = summaryRect.Left + 16;
+                    buttonY += 34;
+                    videoW = Math.Min(100, summaryRect.Width - 32);
+                }
+                _videoPageRect = new Rectangle(buttonX, buttonY, videoW, 28);
+                DrawButton(sb, _videoPageRect, "MEDIA", new Color(104, 76, 150, 255));
+            }
+            if (!_githubPageRect.IsEmpty || !_videoPageRect.IsEmpty)
+                buttonY = Math.Max(_githubPageRect.Bottom, _videoPageRect.Bottom) + 8;
+
+            int y = buttonY;
+            if (!string.IsNullOrWhiteSpace(m.DllUrl))
+                DrawDetailLink(sb, "DLL", m.DllUrl, ref y, summaryRect);
 
             string desc = string.IsNullOrWhiteSpace(m.Description) ? "(No description)" : m.Description;
-            var dp = new Vector2(_rightRect.Left + 10, y + 6);
-            DrawWrappedText(sb, "Description: " + desc, dp, _rightRect.Width - 20, 2, new Color(210, 214, 220, 255));
-            DrawPreview(sb, m, y + (_smallFont.LineSpacing * 2) + 14);
+            sb.Draw(_white, descRect, new Color(18, 24, 34, 255));
+            DrawBorder(sb, descRect, new Color(42, 58, 84, 255));
+            var descLabel = new Vector2(descRect.Left + 12, descRect.Top + 10);
+            sb.DrawString(_smallFont, "Description", descLabel + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, "Description", descLabel, new Color(155, 185, 230, 255));
+            var dp = new Vector2(descRect.Left + 12, descRect.Top + _smallFont.LineSpacing + 14);
+            int descLines = Math.Max(2, (descRect.Bottom - (int)dp.Y - 8) / Math.Max(1, _smallFont.LineSpacing));
+            DrawWrappedText(sb, desc, dp, descRect.Width - 24, descLines, new Color(210, 214, 220, 255));
+        }
+
+        private void DrawDetailBadge(SpriteBatch sb, Rectangle rect, string text, Color fill)
+        {
+            sb.Draw(_white, rect, fill);
+            DrawBorder(sb, rect, new Color(150, 180, 220, 255));
+            var size = _smallFont.MeasureString(text);
+            var pos = new Vector2(rect.Center.X - size.X / 2f, rect.Center.Y - size.Y / 2f);
+            sb.DrawString(_smallFont, text, pos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, text, pos, Color.White);
+        }
+
+        private void DrawDetailMetaText(SpriteBatch sb, Vector2 pos, string label, string value, int width)
+        {
+            string text = label + ": " + (string.IsNullOrWhiteSpace(value) ? "-" : value);
+            sb.DrawString(_smallFont, Clip(text, width), pos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, Clip(text, width), pos, new Color(188, 204, 228, 255));
+        }
+
+        private void DrawDetailLink(SpriteBatch sb, string label, string value, ref int y, Rectangle bounds)
+        {
+            var row = new Rectangle(bounds.Left + 16, y, bounds.Width - 32, Math.Max(24, _smallFont.LineSpacing + 8));
+            sb.Draw(_white, row, new Color(15, 21, 30, 255));
+            DrawBorder(sb, row, new Color(37, 52, 76, 255));
+            string text = label + ": " + value;
+            var p = new Vector2(row.Left + 10, row.Top + 5);
+            sb.DrawString(_smallFont, Clip(text, row.Width - 20), p + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, Clip(text, row.Width - 20), p, new Color(180, 205, 238, 255));
+            y += row.Height + 5;
         }
 
         private void DrawCreateModView(SpriteBatch sb)
         {
             var currentField = GetSelectedCreateField();
-            bool publishMode = false;
-            Color modFilesColor = _createShowTemplateTab ? new Color(45, 65, 100, 255) : new Color(56, 78, 118, 255);
-            Color templateColor = _createShowTemplateTab ? new Color(56, 78, 118, 255) : new Color(45, 65, 100, 255);
-            DrawButton(sb, _createFieldsTabRect, "Mod Files", modFilesColor);
-            DrawButton(sb, _createTemplateTabRect, "Template", templateColor);
-
-            // Mod selector
-            if (_availableModFolders.Length > 0)
-            {
-                sb.Draw(_white, _createModSelectorRect, new Color(20, 27, 37, 255));
-                DrawBorder(sb, _createModSelectorRect, new Color(86, 112, 154, 255));
-                string modDisplay = "Mod: " + _availableModFolders[_selectedModFolderIndex];
-                if (_availableModFolders.Length > 1)
-                    modDisplay += " (" + (_selectedModFolderIndex + 1) + "/" + _availableModFolders.Length + ")";
-                var modPos = new Vector2(_createModSelectorRect.Left + 6, _createModSelectorRect.Top + 3);
-                sb.DrawString(_smallFont, Clip(modDisplay, _createModSelectorRect.Width - 12), modPos + new Vector2(1, 1), Color.Black);
-                sb.DrawString(_smallFont, Clip(modDisplay, _createModSelectorRect.Width - 12), modPos, Color.LightBlue);
-                if (_availableModFolders.Length > 1)
-                {
-                    var hintPos = new Vector2(_createModSelectorRect.Left + 6, _createModSelectorRect.Top + _smallFont.LineSpacing + 1);
-                    sb.DrawString(_smallFont, "Ctrl+Left/Right to switch", hintPos, new Color(120, 140, 160, 200));
-                }
-            }
+            DrawButton(sb, _createFieldsTabRect, "Created Mods", !_createShowTemplateTab ? new Color(72, 112, 178, 255) : new Color(37, 49, 69, 255));
+            DrawButton(sb, _createTemplateTabRect, "Build Output", _createShowTemplateTab ? new Color(72, 112, 178, 255) : new Color(37, 49, 69, 255));
 
             sb.Draw(_white, _createFieldFilterRect, _focusCreateFieldFilter ? new Color(34, 45, 62, 255) : new Color(20, 27, 37, 255));
             DrawBorder(sb, _createFieldFilterRect, new Color(86, 112, 154, 255));
-            string leftFilter = string.IsNullOrWhiteSpace(_createFieldFilterText) ? "Find file..." : _createFieldFilterText;
+            string leftFilter = string.IsNullOrWhiteSpace(_createFieldFilterText) ? "Find mod folder or file..." : _createFieldFilterText;
             Color leftFilterColor = string.IsNullOrWhiteSpace(_createFieldFilterText) ? new Color(150, 160, 176, 255) : Color.White;
             var leftFilterPos = new Vector2(_createFieldFilterRect.Left + 6, _createFieldFilterRect.Top + 3);
             sb.DrawString(_smallFont, Clip(leftFilter, _createFieldFilterRect.Width - 12), leftFilterPos + new Vector2(1, 1), Color.Black);
             sb.DrawString(_smallFont, Clip(leftFilter, _createFieldFilterRect.Width - 12), leftFilterPos, leftFilterColor);
 
-            int rowHeight = Math.Max(34, _smallFont.LineSpacing + 10);
-            int listTop = _createFieldFilterRect.Bottom + 6;
-            int maxVisibleRows = Math.Max(1, (_leftRect.Bottom - listTop - 10) / rowHeight);
-            int drawRows = _createGroupExpanded ? _visibleCreateFieldIndices.Count + 1 : 1;
-            int count = Math.Min(maxVisibleRows, drawRows);
-            for (int i = 0; i < count; i++)
-            {
-                bool isGroupRow = !publishMode && i == 0;
-                int fieldIndex = -1;
-                if (!isGroupRow)
-                    fieldIndex = _visibleCreateFieldIndices[i - 1];
-                var row = new Rectangle(_leftRect.Left + 1, listTop + (i * rowHeight), _leftRect.Width - 10, rowHeight);
-                bool sel = !isGroupRow && fieldIndex == _createSelectedFieldIndex;
-                sb.Draw(_white, row, sel ? new Color(70, 98, 145, 255) : new Color(33, 39, 49, 255));
-                DrawBorder(sb, row, new Color(42, 50, 63, 255));
+            int headerTop = _createFieldFilterRect.Bottom + 7;
+            var leftHeaderRect = new Rectangle(_leftRect.Left + 6, headerTop, _leftRect.Width - 18, 26);
+            sb.Draw(_white, leftHeaderRect, new Color(24, 31, 43, 255));
+            DrawBorder(sb, leftHeaderRect, new Color(48, 62, 84, 255));
+            string rootName = "Root: !Mods\\ModBrowser\\Created Mod";
+            var rootPos = new Vector2(leftHeaderRect.Left + 8, leftHeaderRect.Top + 5);
+            sb.DrawString(_smallFont, Clip(rootName, leftHeaderRect.Width - 16), rootPos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, Clip(rootName, leftHeaderRect.Width - 16), rootPos, new Color(150, 176, 210, 255));
 
-                string rowText;
-                if (isGroupRow)
+            int rowHeight = Math.Max(24, _smallFont.LineSpacing + 6);
+            int listTop = leftHeaderRect.Bottom + 6;
+            int maxVisibleRows = Math.Max(1, (_leftRect.Bottom - listTop - 10) / rowHeight);
+            int rowIndex = 0;
+            for (int i = 0; i < _availableModFolders.Length && rowIndex < maxVisibleRows; i++)
+            {
+                string folder = _availableModFolders[i] ?? "";
+                string query = (_createFieldFilterText ?? "").Trim();
+                bool folderMatches = string.IsNullOrWhiteSpace(query) || folder.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+                bool folderSelected = i == _selectedModFolderIndex;
+                if (folderMatches || folderSelected)
                 {
-                    string projectName = GetCreateTemplateProjectName();
-                    rowText = (_createGroupExpanded ? "[-] " : "[+] ") + projectName;
+                    var row = new Rectangle(_leftRect.Left + 6, listTop + (rowIndex * rowHeight), _leftRect.Width - 18, rowHeight);
+                    sb.Draw(_white, row, folderSelected ? new Color(61, 86, 130, 255) : new Color(22, 29, 40, 255));
+                    DrawBorder(sb, row, folderSelected ? new Color(96, 135, 196, 255) : new Color(38, 48, 63, 255));
+                    sb.Draw(_white, new Rectangle(row.Left, row.Top, 3, row.Height), folderSelected ? new Color(110, 170, 245, 255) : new Color(62, 78, 102, 255));
+                    string rowText = (folderSelected ? "▼ " : "▶ ") + folder;
+                    var textPos = new Vector2(row.Left + 9, row.Top + 4);
+                    sb.DrawString(_smallFont, Clip(rowText, row.Width - 18), textPos + new Vector2(1, 1), Color.Black);
+                    sb.DrawString(_smallFont, Clip(rowText, row.Width - 18), textPos, folderSelected ? Color.White : new Color(214, 222, 234, 255));
+                    rowIndex++;
                 }
-                else
+
+                if (folderSelected)
                 {
                     var activeFields = GetActiveCreateFields();
-                    rowText = activeFields[fieldIndex].Label;
-                    string projectName = GetCreateTemplateProjectName();
-                    rowText = projectName + "\\" + rowText;
+                    for (int f = 0; f < _visibleCreateFieldIndices.Count && rowIndex < maxVisibleRows; f++)
+                    {
+                        int fieldIndex = _visibleCreateFieldIndices[f];
+                        if (fieldIndex < 0 || fieldIndex >= activeFields.Count)
+                            continue;
+                        var field = activeFields[fieldIndex];
+                        var row = new Rectangle(_leftRect.Left + 18, listTop + (rowIndex * rowHeight), _leftRect.Width - 30, rowHeight);
+                        bool sel = fieldIndex == _createSelectedFieldIndex;
+                        sb.Draw(_white, row, sel ? new Color(75, 105, 156, 255) : new Color(17, 23, 32, 255));
+                        DrawBorder(sb, sel ? row : new Rectangle(row.Left, row.Top, row.Width, row.Height - 1), sel ? new Color(110, 150, 210, 255) : new Color(34, 43, 56, 255));
+                        string fileText = GetCreateFileBadge(field.Label) + "  " + field.Label;
+                        var textPos = new Vector2(row.Left + 10, row.Top + 4);
+                        sb.DrawString(_smallFont, Clip(fileText, row.Width - 18), textPos + new Vector2(1, 1), Color.Black);
+                        sb.DrawString(_smallFont, Clip(fileText, row.Width - 18), textPos, sel ? Color.White : new Color(190, 204, 222, 255));
+                        rowIndex++;
+                    }
                 }
-
-                var textPos = new Vector2(row.Left + 10, row.Top + 6);
-                string clipped = Clip(rowText, row.Width - 20);
-                sb.DrawString(_smallFont, clipped, textPos + new Vector2(1, 1), Color.Black);
-                sb.DrawString(_smallFont, clipped, textPos, sel ? Color.White : new Color(220, 224, 230, 255));
             }
 
-            var fieldsToDisplay = GetActiveCreateFields();
-            if (fieldsToDisplay.Count == 0)
+            if (_availableModFolders.Length == 0)
             {
-                var emptyPos = new Vector2(_leftRect.Left + 10, listTop + 8);
-                sb.DrawString(_smallFont, "No mod template yet. Click NEW MOD SETUP.", emptyPos + new Vector2(1, 1), Color.Black);
-                sb.DrawString(_smallFont, "No mod template yet. Click NEW MOD SETUP.", emptyPos, new Color(210, 218, 230, 255));
+                var emptyPos = new Vector2(_leftRect.Left + 12, listTop + 8);
+                sb.DrawString(_smallFont, "No created mods yet.", emptyPos + new Vector2(1, 1), Color.Black);
+                sb.DrawString(_smallFont, "No created mods yet.", emptyPos, new Color(210, 218, 230, 255));
             }
 
-            // Left-pane scrollbar style (visual, like Config).
-            var scrollTrack = new Rectangle(_leftRect.Right - 8, listTop, 6, Math.Max(30, (_leftRect.Bottom - listTop - 8)));
-            sb.Draw(_white, scrollTrack, new Color(26, 32, 42, 255));
-            DrawBorder(sb, scrollTrack, new Color(56, 70, 92, 255));
-            int totalRows = Math.Max(1, drawRows);
-            int visibleRowsForThumb = Math.Max(1, maxVisibleRows);
-            float thumbRatio = MathHelper.Clamp(visibleRowsForThumb / (float)totalRows, 0.12f, 1f);
-            int thumbH = Math.Max(16, (int)(scrollTrack.Height * thumbRatio));
-            int thumbY = scrollTrack.Top;
-            var thumb = new Rectangle(scrollTrack.Left + 1, thumbY, Math.Max(2, scrollTrack.Width - 2), thumbH);
-            sb.Draw(_white, thumb, new Color(120, 148, 196, 220));
+            if (_createShowTemplateTab)
+                DrawBuildOutputPanel(sb);
+            else
+                DrawCreateFileEditor(sb, currentField);
+            DrawCreateDiagnosticsStrip(sb);
 
+            DrawButton(sb, _createSaveDraftRect, "SAVE FILES", new Color(58, 65, 80, 255));
+            DrawButton(sb, _createPublishRect, "PUBLISH", new Color(66, 90, 136, 255));
+            DrawButton(sb, _createGenerateRect, "NEW MOD", new Color(70, 118, 78, 255));
+            DrawButton(sb, _createResetRect, "CLEAR", new Color(58, 65, 80, 255));
+            DrawButton(sb, _createVisualStudioRect, "OPEN VS", new Color(66, 100, 136, 255));
+            string buildButtonText = _createShowTemplateTab ? "MOVE TO MODS" : (_buildBusy ? "BUILDING..." : "BUILD");
+            Color buildBtnColor = _createShowTemplateTab ? new Color(72, 112, 178, 255) : _buildBusy ? new Color(50, 80, 50, 255) : new Color(50, 140, 80, 255);
+            DrawButton(sb, _createBuildRect, buildButtonText, buildBtnColor);
+            DrawButton(sb, _closeRect, "CLOSE", new Color(80, 58, 58, 255));
+
+            if (_showCreateFolderPrompt)
+                DrawCreateFolderPrompt(sb);
+        }
+
+        private void DrawCreateFileEditor(SpriteBatch sb, CreateModField currentField)
+        {
             int headerHeight = Math.Max(_smallFont.LineSpacing + 12, _createEditorSearchRect.Height + 8);
             var editorHeaderRect = new Rectangle(_rightRect.Left, _rightRect.Top, _rightRect.Width, headerHeight);
             sb.Draw(_white, editorHeaderRect, new Color(34, 42, 54, 255));
@@ -1234,16 +1375,15 @@ namespace ModBrowser
             string editorTitle = "Editor";
             if (currentField != null && !string.IsNullOrWhiteSpace(currentField.Label))
                 editorTitle = "Editor - " + currentField.Label;
-            int titleLeftPad = 64;
-            int titleMaxWidth = Math.Max(100, _createEditorSearchRect.Left - (_rightRect.Left + titleLeftPad) - 12);
+            int titleMaxWidth = Math.Max(100, _createEditorSearchRect.Left - (_rightRect.Left + 12) - 12);
             string clippedTitle = Clip(editorTitle, titleMaxWidth);
-            var editorTitlePos = new Vector2(_rightRect.Left + titleLeftPad, _rightRect.Top + 6);
+            var editorTitlePos = new Vector2(_rightRect.Left + 12, _rightRect.Top + 6);
             sb.DrawString(_smallFont, clippedTitle, editorTitlePos + new Vector2(1, 1), Color.Black);
             sb.DrawString(_smallFont, clippedTitle, editorTitlePos, Color.White);
 
             sb.Draw(_white, _createEditorSearchRect, _focusCreateEditorSearch ? new Color(34, 45, 62, 255) : new Color(20, 27, 37, 255));
             DrawBorder(sb, _createEditorSearchRect, new Color(86, 112, 154, 255));
-            string editorSearch = string.IsNullOrWhiteSpace(_createEditorSearchText) ? "Find in field..." : _createEditorSearchText;
+            string editorSearch = string.IsNullOrWhiteSpace(_createEditorSearchText) ? "Find in file..." : _createEditorSearchText;
             Color editorSearchColor = string.IsNullOrWhiteSpace(_createEditorSearchText) ? new Color(150, 160, 176, 255) : Color.White;
             var editorSearchPos = new Vector2(_createEditorSearchRect.Left + 6, _createEditorSearchRect.Top + 3);
             sb.DrawString(_smallFont, Clip(editorSearch, _createEditorSearchRect.Width - 12), editorSearchPos + new Vector2(1, 1), Color.Black);
@@ -1257,126 +1397,232 @@ namespace ModBrowser
             var lineGutter = new Rectangle(_createEditorRect.Left + 8, contentTop, lineNumberWidth, Math.Max(40, _createEditorRect.Bottom - contentTop - 8));
             sb.Draw(_white, lineGutter, new Color(16, 20, 28, 255));
 
-            if (currentField != null)
+            if (currentField == null)
+                return;
+
+            string rawText = currentField.Value ?? "";
+            bool showingPlaceholder = string.IsNullOrWhiteSpace(rawText) && !_focusCreateEditor;
+            string editText = showingPlaceholder ? (currentField.Placeholder ?? "") : rawText;
+            Color editColor = showingPlaceholder ? new Color(150, 160, 176, 255) : Color.White;
+            int lineStep = _smallFont.LineSpacing + 2;
+            int textLeft = _createEditorRect.Left + 8 + lineNumberWidth + 10;
+            int textWidth = _createEditorRect.Width - lineNumberWidth - 28;
+            string[] lines = SplitEditorLines(editText);
+            int maxVisibleLines = Math.Max(1, (_createEditorRect.Bottom - contentTop - 12) / lineStep);
+            int linesToDraw = Math.Min(maxVisibleLines, lines.Length);
+
+            for (int i = 0; i < linesToDraw; i++)
             {
-                string rawText = currentField.Value ?? "";
-                bool showingPlaceholder = string.IsNullOrWhiteSpace(rawText) && !_focusCreateEditor;
-                string editText = rawText;
-                if (showingPlaceholder)
-                    editText = currentField.Placeholder ?? "";
+                int srcLine = _createEditorScroll + i;
+                if (srcLine >= lines.Length)
+                    break;
 
-                Color editColor = showingPlaceholder ? new Color(150, 160, 176, 255) : Color.White;
-                int lineStep = _smallFont.LineSpacing + 2;
-                int textLeft = _createEditorRect.Left + 8 + lineNumberWidth + 10;
-                int textWidth = _createEditorRect.Width - lineNumberWidth - 28;
-                string[] lines = SplitEditorLines(editText);
-                int maxVisibleLines = Math.Max(1, (_createEditorRect.Bottom - contentTop - 12) / lineStep);
-                int linesToDraw = Math.Min(maxVisibleLines, lines.Length);
+                int lineY = contentTop + 4 + (i * lineStep);
+                string lineNumber = (srcLine + 1).ToString();
+                var lineNumPos = new Vector2(lineGutter.Left + 10, lineY);
+                sb.DrawString(_smallFont, lineNumber, lineNumPos + new Vector2(1, 1), Color.Black);
+                sb.DrawString(_smallFont, lineNumber, lineNumPos, Color.LightGray);
 
-                for (int i = 0; i < linesToDraw; i++)
+                string lineText = ExpandTabs(lines[srcLine] ?? "");
+                string clippedLineForDisplay = Clip(lineText, textWidth);
+                if (!string.IsNullOrWhiteSpace(_createEditorSearchText))
                 {
-                    int srcLine = _createEditorScroll + i;
-                    if (srcLine >= lines.Length) break;
-                    int lineY = contentTop + 4 + (i * lineStep);
-                    string lineNumber = (srcLine + 1).ToString();
-                    var lineNumPos = new Vector2(lineGutter.Left + 10, lineY);
-                    sb.DrawString(_smallFont, lineNumber, lineNumPos + new Vector2(1, 1), Color.Black);
-                    sb.DrawString(_smallFont, lineNumber, lineNumPos, Color.LightGray);
-
-                    string lineText = (lines[srcLine] ?? "").Replace("\t", "    ");
-                    string clippedLineForDisplay = Clip(lineText, textWidth);
-                    if (!string.IsNullOrWhiteSpace(_createEditorSearchText))
+                    int matchIdx = clippedLineForDisplay.IndexOf(_createEditorSearchText, StringComparison.OrdinalIgnoreCase);
+                    if (matchIdx >= 0)
                     {
-                        int matchIdx = clippedLineForDisplay.IndexOf(_createEditorSearchText, StringComparison.OrdinalIgnoreCase);
-                        if (matchIdx >= 0)
-                        {
-                            string prefix = clippedLineForDisplay.Substring(0, matchIdx);
-                            string match = clippedLineForDisplay.Substring(matchIdx, _createEditorSearchText.Length);
-                            float prefixWidth = _smallFont.MeasureString(prefix).X;
-                            float matchWidth = _smallFont.MeasureString(match).X;
-                            var hiRect = new Rectangle((int)(textLeft + prefixWidth) - 2, lineY - 2, (int)matchWidth + 4, _smallFont.LineSpacing + 6);
-                            sb.Draw(_white, hiRect, new Color(58, 92, 54, 150));
-                        }
+                        string prefix = clippedLineForDisplay.Substring(0, matchIdx);
+                        string match = clippedLineForDisplay.Substring(matchIdx, _createEditorSearchText.Length);
+                        float prefixWidth = _smallFont.MeasureString(prefix).X;
+                        float matchWidth = _smallFont.MeasureString(match).X;
+                        var hiRect = new Rectangle((int)(textLeft + prefixWidth) - 2, lineY - 2, (int)matchWidth + 4, _smallFont.LineSpacing + 6);
+                        sb.Draw(_white, hiRect, new Color(58, 92, 54, 150));
                     }
-
-                    var textPos = new Vector2(textLeft, lineY);
-                    DrawEditorLineWithSyntax(sb, clippedLineForDisplay, textPos, editColor, currentField.Label);
                 }
 
-                // Right-side scrollbar for editor
-                int editorScrollTrackH = Math.Max(20, _createEditorRect.Height - 16);
-                var editorScrollTrack = new Rectangle(_createEditorRect.Right - 7, _createEditorRect.Top + 8, 5, editorScrollTrackH);
-                sb.Draw(_white, editorScrollTrack, new Color(22, 28, 38, 255));
-                if (lines.Length > maxVisibleLines && maxVisibleLines > 0)
-                {
-                    float editorThumbRatio = MathHelper.Clamp((float)maxVisibleLines / lines.Length, 0.06f, 1f);
-                    int editorThumbH = Math.Max(12, (int)(editorScrollTrackH * editorThumbRatio));
-                    int editorThumbY = editorScrollTrack.Top + (int)((editorScrollTrackH - editorThumbH) * ((float)_createEditorScroll / Math.Max(1, lines.Length - maxVisibleLines)));
-                    var editorThumb = new Rectangle(editorScrollTrack.Left, editorThumbY, editorScrollTrack.Width, editorThumbH);
-                    sb.Draw(_white, editorThumb, new Color(86, 130, 196, 210));
-                }
-
-                if (_focusCreateEditor && !showingPlaceholder)
-                    DrawCreateEditorCaret(sb, rawText, lineGutter, contentTop, lineNumberWidth);
+                var textPos = new Vector2(textLeft, lineY);
+                DrawEditorLineWithSyntax(sb, clippedLineForDisplay, textPos, editColor, currentField.Label);
             }
 
-            DrawCreateInfoPanel(sb, currentField, !publishMode);
+            int editorScrollTrackH = Math.Max(20, _createEditorRect.Height - 16);
+            var editorScrollTrack = new Rectangle(_createEditorRect.Right - 7, _createEditorRect.Top + 8, 5, editorScrollTrackH);
+            sb.Draw(_white, editorScrollTrack, new Color(22, 28, 38, 255));
+            if (lines.Length > maxVisibleLines && maxVisibleLines > 0)
+            {
+                float editorThumbRatio = MathHelper.Clamp((float)maxVisibleLines / lines.Length, 0.06f, 1f);
+                int editorThumbH = Math.Max(12, (int)(editorScrollTrackH * editorThumbRatio));
+                int editorThumbY = editorScrollTrack.Top + (int)((editorScrollTrackH - editorThumbH) * ((float)_createEditorScroll / Math.Max(1, lines.Length - maxVisibleLines)));
+                var editorThumb = new Rectangle(editorScrollTrack.Left, editorThumbY, editorScrollTrack.Width, editorThumbH);
+                sb.Draw(_white, editorThumb, new Color(86, 130, 196, 210));
+            }
 
-            // Slim diagnostics strip between editor and info panel
+            if (_focusCreateEditor && !showingPlaceholder)
+                DrawCreateEditorCaret(sb, rawText, lineGutter, contentTop, lineNumberWidth);
+        }
+
+        private static string GetCreateFileBadge(string label)
+        {
+            string ext = Path.GetExtension(label ?? "").ToLowerInvariant();
+            if (ext == ".cs")
+                return "CS";
+            if (ext == ".csproj")
+                return "XML";
+            if (ext == ".md")
+                return "MD";
+            if ((label ?? "").IndexOf("bin\\", StringComparison.OrdinalIgnoreCase) >= 0 || ext == ".dll")
+                return "DLL";
+            return "FILE";
+        }
+
+        private void DrawBuildOutputPanel(SpriteBatch sb)
+        {
+            sb.Draw(_white, _createEditorRect, new Color(18, 24, 34, 255));
+            DrawBorder(sb, _createEditorRect, new Color(62, 75, 95, 255));
+
+            int x = _createEditorRect.Left + 14;
+            int y = _createEditorRect.Top + 12;
+            int maxWidth = _createEditorRect.Width - 28;
+            string title = _buildBusy ? "Build Output - Running" : _buildCompleted ? (_buildSucceeded ? "Build Output - Succeeded" : "Build Output - Failed") : "Build Output";
+            Color titleColor = _buildBusy ? Color.White : _buildCompleted ? (_buildSucceeded ? new Color(100, 220, 110, 255) : new Color(255, 90, 80, 255)) : Color.White;
+            sb.DrawString(_smallFont, title, new Vector2(x, y) + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, title, new Vector2(x, y), titleColor);
+            y += _smallFont.LineSpacing + 8;
+
+            string projectPath = !string.IsNullOrWhiteSpace(_buildLastProjectPath) ? _buildLastProjectPath : _buildPendingProjectPath;
+            DrawCreateInfoTextLine(sb, x, ref y, maxWidth, "Project", string.IsNullOrWhiteSpace(projectPath) ? "-" : projectPath, new Color(196, 205, 220, 255));
+            DrawCreateInfoTextLine(sb, x, ref y, maxWidth, "Output Log", string.IsNullOrWhiteSpace(_buildLastOutputLogPath) ? "-" : _buildLastOutputLogPath, new Color(196, 205, 220, 255));
+            DrawCreateInfoTextLine(sb, x, ref y, maxWidth, "Summary", string.IsNullOrWhiteSpace(_buildLastSummary) ? "No build has run yet." : _buildLastSummary, _buildSucceeded ? new Color(120, 230, 130, 255) : new Color(230, 210, 150, 255));
+
+            int lineStep = _smallFont.LineSpacing + 3;
+            var lines = GetBuildOutputDisplayLines();
+            int listTop = y + 8;
+            var listRect = new Rectangle(_createEditorRect.Left + 10, listTop, _createEditorRect.Width - 20, _createEditorRect.Bottom - listTop - 10);
+            sb.Draw(_white, listRect, new Color(13, 18, 27, 255));
+            DrawBorder(sb, listRect, new Color(45, 60, 84, 255));
+
+            int visible = Math.Max(1, (listRect.Height - 10) / lineStep);
+            int maxScroll = Math.Max(0, lines.Count - visible);
+            if (_buildOutputScroll > maxScroll)
+                _buildOutputScroll = maxScroll;
+            if (_buildOutputScroll < 0)
+                _buildOutputScroll = 0;
+
+            for (int i = 0; i < visible; i++)
+            {
+                int src = _buildOutputScroll + i;
+                if (src >= lines.Count)
+                    break;
+                string line = lines[src] ?? "";
+                Color lineColor = GetBuildOutputLineColor(line);
+                var pos = new Vector2(listRect.Left + 8, listRect.Top + 6 + (i * lineStep));
+                string clipped = Clip(line, listRect.Width - 16);
+                sb.DrawString(_smallFont, clipped, pos + new Vector2(1, 1), Color.Black);
+                sb.DrawString(_smallFont, clipped, pos, lineColor);
+            }
+        }
+
+        private List<string> GetBuildOutputDisplayLines()
+        {
+            var lines = new List<string>();
+            if (_buildBusy)
+                lines.Add("Running MSBuild...");
+            if (_buildDiagLines != null && _buildDiagLines.Count > 0)
+                lines.AddRange(_buildDiagLines);
+            if (_buildOutputLines != null && _buildOutputLines.Count > 0)
+            {
+                if (lines.Count > 0)
+                    lines.Add("");
+                lines.AddRange(_buildOutputLines);
+            }
+            if (lines.Count == 0)
+                lines.Add("No build output yet. Click BUILD to compile a created mod.");
+            return lines;
+        }
+
+        private Color GetBuildOutputLineColor(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                return new Color(120, 130, 145, 255);
+            if (Regex.IsMatch(line, @":\s*error\s+\w+", RegexOptions.IgnoreCase) || line.IndexOf("Build FAILED", StringComparison.OrdinalIgnoreCase) >= 0 || line.IndexOf("Failed", StringComparison.OrdinalIgnoreCase) >= 0)
+                return new Color(255, 100, 80, 255);
+            if (Regex.IsMatch(line, @":\s*warning\s+\w+", RegexOptions.IgnoreCase) || line.IndexOf("Warning", StringComparison.OrdinalIgnoreCase) >= 0)
+                return new Color(255, 200, 60, 255);
+            if (line.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0 || line.IndexOf("Done", StringComparison.OrdinalIgnoreCase) >= 0)
+                return new Color(110, 225, 120, 255);
+            return new Color(200, 208, 220, 255);
+        }
+
+        private void DrawCreateOverviewPanel(SpriteBatch sb, CreateModField currentField)
+        {
+            sb.Draw(_white, _createEditorRect, new Color(18, 24, 34, 255));
+            DrawBorder(sb, _createEditorRect, new Color(62, 75, 95, 255));
+
+            int x = _createEditorRect.Left + 16;
+            int y = _createEditorRect.Top + 14;
+            int maxWidth = _createEditorRect.Width - 32;
+            string modName = (_selectedModFolderIndex >= 0 && _selectedModFolderIndex < _availableModFolders.Length) ? _availableModFolders[_selectedModFolderIndex] : "No mod selected";
+            DrawCreateInfoSectionTitle(sb, x, ref y, "Create Mod");
+            DrawCreateInfoTextLine(sb, x, ref y, maxWidth, "Selected", modName, Color.White);
+            DrawCreateInfoTextLine(sb, x, ref y, maxWidth, "Location", string.IsNullOrWhiteSpace(_currentModRootPath) ? "-" : _currentModRootPath, new Color(188, 204, 228, 255));
+            y += 8;
+
+            DrawCreateInfoSectionTitle(sb, x, ref y, "Actions");
+            DrawCreateInfoNodeLine(sb, x, ref y, maxWidth, "[NEW MOD]", "Create a clean starter mod folder.");
+            DrawCreateInfoNodeLine(sb, x, ref y, maxWidth, "[BUILD]", "Build the selected created mod.");
+            DrawCreateInfoNodeLine(sb, x, ref y, maxWidth, "[OPEN VS]", "Open the selected mod in Visual Studio.");
+            DrawCreateInfoNodeLine(sb, x, ref y, maxWidth, "[PUBLISH]", "Create community entry files for sharing.");
+            y += 8;
+
+            DrawCreateInfoSectionTitle(sb, x, ref y, "Selected File");
+            if (currentField == null)
+            {
+                DrawCreateInfoTextLine(sb, x, ref y, maxWidth, "File", "-", new Color(196, 205, 220, 255));
+            }
+            else
+            {
+                DrawCreateInfoTextLine(sb, x, ref y, maxWidth, "File", currentField.Label, new Color(196, 205, 220, 255));
+                string fileText = currentField.Value ?? "";
+                string[] lines = SplitEditorLines(fileText);
+                DrawCreateInfoTextLine(sb, x, ref y, maxWidth, "Lines", lines.Length.ToString(), new Color(196, 205, 220, 255));
+                DrawCreateInfoTextLine(sb, x, ref y, maxWidth, "Size", fileText.Length.ToString() + " chars", new Color(196, 205, 220, 255));
+            }
+
+            DrawCreateInfoPanel(sb, currentField, false);
+        }
+
+        private void DrawCreateDiagnosticsStrip(SpriteBatch sb)
+        {
             sb.Draw(_white, _createDiagnosticsRect, new Color(17, 21, 29, 255));
             DrawBorder(sb, _createDiagnosticsRect, new Color(62, 75, 95, 255));
             int warnCount = _buildLastWarningCount;
             int errCount = _buildLastErrorCount;
             Color warnColor = warnCount > 0 ? new Color(255, 200, 60, 255) : new Color(120, 130, 145, 255);
             Color errColor = errCount > 0 ? new Color(255, 90, 80, 255) : new Color(120, 130, 145, 255);
-            string diagText = "Warnings: " + warnCount + "   Errors: " + errCount;
-            var diagPos = new Vector2(_createDiagnosticsRect.Left + 10, _createDiagnosticsRect.Top + (_createDiagnosticsRect.Height - _smallFont.LineSpacing) / 2);
-            // Draw warning count in yellow and error count in red
+            var dpos = new Vector2(_createDiagnosticsRect.Left + 10, _createDiagnosticsRect.Top + (_createDiagnosticsRect.Height - _smallFont.LineSpacing) / 2);
             string diagWarnings = "Warnings: ";
             string diagWarnNum = warnCount.ToString();
             string diagSep = "   Errors: ";
             string diagErrNum = errCount.ToString();
-            var dpos = diagPos;
-            sb.DrawString(_smallFont, diagWarnings, dpos + new Vector2(1,1), Color.Black);
+            sb.DrawString(_smallFont, diagWarnings, dpos + new Vector2(1, 1), Color.Black);
             sb.DrawString(_smallFont, diagWarnings, dpos, new Color(180, 185, 195, 255));
             dpos.X += _smallFont.MeasureString(diagWarnings).X;
-            sb.DrawString(_smallFont, diagWarnNum, dpos + new Vector2(1,1), Color.Black);
+            sb.DrawString(_smallFont, diagWarnNum, dpos + new Vector2(1, 1), Color.Black);
             sb.DrawString(_smallFont, diagWarnNum, dpos, warnColor);
             dpos.X += _smallFont.MeasureString(diagWarnNum).X;
-            sb.DrawString(_smallFont, diagSep, dpos + new Vector2(1,1), Color.Black);
+            sb.DrawString(_smallFont, diagSep, dpos + new Vector2(1, 1), Color.Black);
             sb.DrawString(_smallFont, diagSep, dpos, new Color(180, 185, 195, 255));
             dpos.X += _smallFont.MeasureString(diagSep).X;
-            sb.DrawString(_smallFont, diagErrNum, dpos + new Vector2(1,1), Color.Black);
+            sb.DrawString(_smallFont, diagErrNum, dpos + new Vector2(1, 1), Color.Black);
             sb.DrawString(_smallFont, diagErrNum, dpos, errColor);
-            // Show last build summary on the right side of diag strip
+
             if (!string.IsNullOrWhiteSpace(_buildLastSummary) && _buildCompleted)
             {
                 string sumClipped = Clip(_buildLastSummary, _createDiagnosticsRect.Width - 200);
                 var sumSize = _smallFont.MeasureString(sumClipped);
-                var sumPos = new Vector2(_createDiagnosticsRect.Right - (int)sumSize.X - 10, diagPos.Y);
+                var sumPos = new Vector2(_createDiagnosticsRect.Right - (int)sumSize.X - 10, _createDiagnosticsRect.Top + (_createDiagnosticsRect.Height - _smallFont.LineSpacing) / 2);
                 Color sumColor = _buildSucceeded ? new Color(100, 200, 100, 255) : new Color(255, 100, 80, 255);
-                sb.DrawString(_smallFont, sumClipped, sumPos + new Vector2(1,1), Color.Black);
+                sb.DrawString(_smallFont, sumClipped, sumPos + new Vector2(1, 1), Color.Black);
                 sb.DrawString(_smallFont, sumClipped, sumPos, sumColor);
             }
-
-            DrawButton(sb, _createSaveDraftRect, "SAVE DRAFT", new Color(58, 65, 80, 255));
-            DrawButton(sb, _createPublishRect, "PUBLISH", new Color(66, 90, 136, 255));
-            DrawButton(sb, _createGenerateRect, "MAKE A MOD", new Color(70, 118, 78, 255));
-            DrawButton(sb, _createResetRect, "RESET", new Color(58, 65, 80, 255));
-            DrawButton(sb, _createVisualStudioRect, "OPEN VS", new Color(66, 100, 136, 255));
-            if (_createShowTemplateTab)
-            {
-                DrawButton(sb, _createMoveToModsRect, "Move it to !Mods", new Color(70, 100, 70, 255));
-            }
-            else
-            {
-                Color buildBtnColor = _buildBusy ? new Color(50, 80, 50, 255) : new Color(50, 140, 80, 255);
-                DrawButton(sb, _createBuildRect, _buildBusy ? "BUILDING..." : "BUILD", buildBtnColor);
-            }
-            DrawButton(sb, _closeRect, "CLOSE", new Color(80, 58, 58, 255));
-
-            if (_showCreateFolderPrompt)
-                DrawCreateFolderPrompt(sb);
         }
 
         private void DrawCreateInfoPanel(SpriteBatch sb, CreateModField currentField, bool createOnlyMode)
@@ -1568,36 +1814,167 @@ namespace ModBrowser
             DrawButton(sb, _publishPromptCancelRect, "CANCEL", new Color(80, 58, 58, 255));
         }
 
-        private void RequestCloseOrShowReloadPrompt()
+        private void OpenSelectedModPage()
         {
-            if (_downloadedAnyThisSession)
+            if (_selectedIndex < 0 || _selectedIndex >= _mods.Count)
+                return;
+
+            string url = (_mods[_selectedIndex].PageUrl ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(url))
             {
-                _showReloadNoticePrompt = true;
+                _status = "No GitHub page is listed for this mod.";
+                _statusColor = Color.LightGray;
                 return;
             }
-            PopMe();
+
+            try
+            {
+                Process.Start(url);
+                _status = "Opening GitHub page...";
+                _statusColor = Color.LightGreen;
+            }
+            catch
+            {
+                _status = "Could not open GitHub page.";
+                _statusColor = Color.OrangeRed;
+            }
         }
 
-        private void DrawReloadNoticePrompt(SpriteBatch sb)
+        private void OpenSelectedModVideo()
         {
-            sb.Draw(_white, _panelRect, new Color(0, 0, 0, 170));
-            sb.Draw(_white, _reloadNoticePanelRect, new Color(21, 27, 36, 248));
-            DrawBorder(sb, _reloadNoticePanelRect, new Color(100, 124, 170, 255));
+            if (_selectedIndex < 0 || _selectedIndex >= _mods.Count)
+                return;
 
-            var titlePos = new Vector2(_reloadNoticePanelRect.Left + 16, _reloadNoticePanelRect.Top + 14);
-            var textPos = new Vector2(_reloadNoticePanelRect.Left + 16, _reloadNoticePanelRect.Top + 50);
-            sb.DrawString(_smallFont, "Reload Needed", titlePos + new Vector2(1, 1), Color.Black);
-            sb.DrawString(_smallFont, "Reload Needed", titlePos, Color.White);
+            string url = GetSelectedModVideoUrl(_mods[_selectedIndex]);
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                _status = "No media preview is listed for this mod.";
+                _statusColor = Color.LightGray;
+                return;
+            }
 
-            string line1 = "You downloaded mod files this session.";
-            string line2 = "Unload/reload mods (or restart game) so new files are detected.";
+            try
+            {
+                Process.Start(url);
+                _status = "Opening media preview...";
+                _statusColor = Color.LightGreen;
+            }
+            catch
+            {
+                _status = "Could not open media preview.";
+                _statusColor = Color.OrangeRed;
+            }
+        }
+
+        private void DrawExternalUpdaterPrompt(SpriteBatch sb)
+        {
+            sb.Draw(_white, _panelRect, new Color(0, 0, 0, 185));
+            sb.Draw(_white, _externalUpdaterPromptPanelRect, new Color(21, 27, 36, 250));
+            DrawBorder(sb, _externalUpdaterPromptPanelRect, new Color(190, 130, 45, 255));
+
+            var titlePos = new Vector2(_externalUpdaterPromptPanelRect.Left + 16, _externalUpdaterPromptPanelRect.Top + 14);
+            var textPos = new Vector2(_externalUpdaterPromptPanelRect.Left + 16, _externalUpdaterPromptPanelRect.Top + 50);
+            sb.DrawString(_smallFont, _externalUpdaterPromptTitle, titlePos + new Vector2(1, 1), Color.Black);
+            sb.DrawString(_smallFont, _externalUpdaterPromptTitle, titlePos, Color.White);
+
+            string line1 = "Press OK to close the game and apply updates.";
+            string line2 = !string.IsNullOrWhiteSpace(_pendingUpdaterMessage) ? _pendingUpdaterMessage : string.IsNullOrWhiteSpace(_pendingUpdaterBatPath) ? "Downloaded DLLs will load next time you start the game." : "A console window will open, unzip updates, replace files, then restart the game.";
             sb.DrawString(_smallFont, line1, textPos + new Vector2(1, 1), Color.Black);
-            sb.DrawString(_smallFont, line1, textPos, new Color(210, 218, 230, 255));
+            sb.DrawString(_smallFont, line1, textPos, new Color(230, 220, 190, 255));
             sb.DrawString(_smallFont, line2, textPos + new Vector2(0, _smallFont.LineSpacing + 4) + new Vector2(1, 1), Color.Black);
-            sb.DrawString(_smallFont, line2, textPos + new Vector2(0, _smallFont.LineSpacing + 4), new Color(210, 218, 230, 255));
+            sb.DrawString(_smallFont, line2, textPos + new Vector2(0, _smallFont.LineSpacing + 4), new Color(230, 220, 190, 255));
 
-            DrawButton(sb, _reloadNoticeStayRect, "STAY", new Color(58, 65, 80, 255));
-            DrawButton(sb, _reloadNoticeCloseRect, "CLOSE NOW", new Color(80, 58, 58, 255));
+            DrawButton(sb, _externalUpdaterPromptOkRect, "OK", new Color(160, 103, 42, 255));
+        }
+
+        private void LaunchPendingUpdaterAndExitGame()
+        {
+            try
+            {
+                _showExternalUpdaterPrompt = false;
+                if (string.IsNullOrWhiteSpace(_pendingUpdaterBatPath))
+                {
+                    Environment.Exit(0);
+                    return;
+                }
+
+                if (!File.Exists(_pendingUpdaterBatPath))
+                {
+                    _status = "Updater script is missing.";
+                    _statusColor = Color.OrangeRed;
+                    return;
+                }
+
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/k \"" + _pendingUpdaterBatPath + "\"",
+                    WorkingDirectory = Path.GetDirectoryName(_pendingUpdaterBatPath),
+                    UseShellExecute = true,
+                    WindowStyle = ProcessWindowStyle.Normal
+                });
+                Environment.Exit(0);
+            }
+            catch (Exception ex)
+            {
+                _status = "Could not launch updater: " + ex.Message;
+                _statusColor = Color.OrangeRed;
+            }
+        }
+
+        private void ShowCloseGamePrompt(string title, string message)
+        {
+            _pendingUpdaterBatPath = "";
+            _externalUpdaterPromptTitle = string.IsNullOrWhiteSpace(title) ? "Update Ready" : title;
+            _pendingUpdaterMessage = message ?? "";
+            _showExternalUpdaterPrompt = true;
+        }
+
+        private void VerifyInstalledVersions()
+        {
+            try
+            {
+                string modsRoot = GetActiveModsRoot();
+                var installed = new Dictionary<string, string>();
+                if (Directory.Exists(modsRoot))
+                {
+                    foreach (var dll in Directory.GetFiles(modsRoot, "*.dll", SearchOption.TopDirectoryOnly))
+                    {
+                        string name = Path.GetFileNameWithoutExtension(dll);
+                        installed[name] = dll;
+                    }
+                }
+
+                var mismatches = new List<string>();
+                int verified = 0;
+                for (int i = 0; i < _mods.Count; i++)
+                {
+                    var m = _mods[i];
+                    string key = GetModKey(m);
+                    if (installed.ContainsKey(key))
+                    {
+                        verified++;
+                    }
+                    else if (_modsWithUpdates.Contains(key))
+                    {
+                        mismatches.Add(m.Name ?? m.Id ?? key);
+                    }
+                }
+
+                if (mismatches.Count > 0)
+                {
+                    _status = "Update verification: " + verified + " mods OK, " + mismatches.Count + " still missing: " + string.Join(", ", mismatches.ToArray());
+                    _statusColor = Color.OrangeRed;
+                }
+                else if (verified > 0)
+                {
+                    _status = "Update verification: All " + verified + " mods installed successfully.";
+                    _statusColor = Color.LightGreen;
+                }
+            }
+            catch
+            {
+            }
         }
 
         private CreateModField GetSelectedCreateField()
@@ -1885,23 +2262,96 @@ namespace ModBrowser
             if (_createCodeFields.Count > 0)
                 return;
 
+            RefreshCreatedModFolders(false);
+        }
+
+        private void RefreshCreatedModFolders(bool showStatus)
+        {
             try
             {
                 string root = GetCreatedModsRoot();
                 if (!Directory.Exists(root))
+                {
+                    _availableModFolders = new string[0];
+                    _createCodeFields.Clear();
+                    _currentModRootPath = "";
+                    _selectedModFolderIndex = -1;
+                    if (showStatus)
+                    {
+                        _status = "No created mod folder found yet.";
+                        _statusColor = Color.LightGray;
+                    }
                     return;
+                }
 
                 var dirs = Directory.GetDirectories(root);
                 if (dirs == null || dirs.Length == 0)
+                {
+                    _availableModFolders = new string[0];
+                    _createCodeFields.Clear();
+                    _currentModRootPath = "";
+                    _selectedModFolderIndex = -1;
+                    if (showStatus)
+                    {
+                        _status = "No created mods yet.";
+                        _statusColor = Color.LightGray;
+                    }
                     return;
+                }
 
                 Array.Sort(dirs, StringComparer.OrdinalIgnoreCase);
                 _availableModFolders = dirs.Select(d => new DirectoryInfo(d).Name).ToArray();
-                _selectedModFolderIndex = 0;
-                LoadModAtIndex(0);
+                int index = _selectedModFolderIndex;
+                if (index < 0 || index >= _availableModFolders.Length)
+                    index = 0;
+                LoadModAtIndex(index);
+                if (showStatus)
+                {
+                    _status = "Refreshed created mods.";
+                    _statusColor = Color.LightGreen;
+                }
             }
             catch
             {
+            }
+        }
+
+        private void HandleCreateListClick(int clickedRow)
+        {
+            if (clickedRow < 0)
+                return;
+
+            int rowIndex = 0;
+            int listTop = _createFieldFilterRect.Bottom + 7 + 26 + 6;
+            int maxRows = Math.Max(1, (_leftRect.Bottom - listTop - 10) / Math.Max(24, _smallFont.LineSpacing + 6));
+            for (int i = 0; i < _availableModFolders.Length && rowIndex < maxRows; i++)
+            {
+                string folder = _availableModFolders[i] ?? "";
+                string query = (_createFieldFilterText ?? "").Trim();
+                bool folderMatches = string.IsNullOrWhiteSpace(query) || folder.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+                bool folderSelected = i == _selectedModFolderIndex;
+                if (folderMatches || folderSelected)
+                {
+                    if (rowIndex == clickedRow)
+                    {
+                        LoadModAtIndex(i);
+                        return;
+                    }
+                    rowIndex++;
+                }
+
+                if (folderSelected)
+                {
+                    for (int f = 0; f < _visibleCreateFieldIndices.Count && rowIndex < maxRows; f++)
+                    {
+                        if (rowIndex == clickedRow)
+                        {
+                            SetSelectedCreateField(_visibleCreateFieldIndices[f]);
+                            return;
+                        }
+                        rowIndex++;
+                    }
+                }
             }
         }
 
@@ -1950,6 +2400,21 @@ namespace ModBrowser
             }
             catch
             {
+            }
+        }
+
+        private void LoadModByName(string modName)
+        {
+            if (string.IsNullOrWhiteSpace(modName) || _availableModFolders == null)
+                return;
+
+            for (int i = 0; i < _availableModFolders.Length; i++)
+            {
+                if (string.Equals(_availableModFolders[i], modName, StringComparison.OrdinalIgnoreCase))
+                {
+                    LoadModAtIndex(i);
+                    return;
+                }
             }
         }
 
@@ -2054,7 +2519,7 @@ namespace ModBrowser
             if (field == null || string.IsNullOrEmpty(text))
                 return;
 
-            string value = field.Value ?? "";
+            string value = NormalizeEditorText(field.Value);
             int insertIndex = _createCaretIndex;
             if (insertIndex < 0)
                 insertIndex = 0;
@@ -2063,6 +2528,7 @@ namespace ModBrowser
 
             field.Value = value.Substring(0, insertIndex) + text + value.Substring(insertIndex);
             _createCaretIndex = insertIndex + text.Length;
+            EnsureCreateCaretVisible();
         }
 
         private void BackspaceSelectedCreateField()
@@ -2071,7 +2537,7 @@ namespace ModBrowser
             if (field == null)
                 return;
 
-            string value = field.Value ?? "";
+            string value = NormalizeEditorText(field.Value);
             if (string.IsNullOrEmpty(value) || _createCaretIndex <= 0)
                 return;
 
@@ -2080,6 +2546,7 @@ namespace ModBrowser
 
             field.Value = value.Remove(_createCaretIndex - 1, 1);
             _createCaretIndex--;
+            EnsureCreateCaretVisible();
         }
 
         private static bool IsShiftHeld()
@@ -2114,6 +2581,16 @@ namespace ModBrowser
             if (lines.Length == 0)
                 return new[] { "" };
             return lines;
+        }
+
+        private static string NormalizeEditorText(string text)
+        {
+            return (text ?? "").Replace("\r\n", "\n").Replace('\r', '\n');
+        }
+
+        private static string ExpandTabs(string text)
+        {
+            return (text ?? "").Replace("\t", "    ");
         }
 
         private static void GetCaretLineAndColumn(string text, int caretIndex, out int lineIndex, out int columnIndex)
@@ -2173,7 +2650,7 @@ namespace ModBrowser
             if (field == null)
                 return;
 
-            string text = field.Value ?? "";
+            string text = NormalizeEditorText(field.Value);
             int lineNumberWidth = 56;
             int lineStep = _smallFont.LineSpacing + 2;
             int headerHeight = Math.Max(_smallFont.LineSpacing + 12, _createEditorSearchRect.Height + 8);
@@ -2182,9 +2659,10 @@ namespace ModBrowser
             int textRight = _createEditorRect.Right - 10;
             int maxVisibleLines = Math.Max(1, (_createEditorRect.Bottom - (contentTop - 4) - 12) / lineStep);
 
-            int line = (point.Y - contentTop) / lineStep;
-            if (line < 0) line = 0;
-            if (line >= maxVisibleLines) line = maxVisibleLines - 1;
+            int visibleLine = (point.Y - contentTop) / lineStep;
+            if (visibleLine < 0) visibleLine = 0;
+            if (visibleLine >= maxVisibleLines) visibleLine = maxVisibleLines - 1;
+            int line = _createEditorScroll + visibleLine;
 
             string[] lines = SplitEditorLines(text);
             if (line >= lines.Length)
@@ -2194,7 +2672,7 @@ namespace ModBrowser
             if (clickX < textLeft) clickX = textLeft;
             if (clickX > textRight) clickX = textRight;
 
-            string currentLine = line < lines.Length ? (lines[line] ?? "") : "";
+            string currentLine = line < lines.Length ? ExpandTabs(lines[line] ?? "") : "";
             int column = 0;
             if (point.X >= textRight - 2)
                 column = currentLine.Length;
@@ -2203,8 +2681,9 @@ namespace ModBrowser
                 while (column < currentLine.Length)
                 {
                     string prefix = currentLine.Substring(0, column + 1);
-                    int px = textLeft + (int)_smallFont.MeasureString(prefix).X;
-                    if (px >= clickX)
+                    float charRight = textLeft + _smallFont.MeasureString(prefix).X;
+                    float charLeft = column > 0 ? textLeft + _smallFont.MeasureString(currentLine.Substring(0, column)).X : textLeft;
+                    if (clickX < (charLeft + charRight) / 2f)
                         break;
                     column++;
                 }
@@ -2221,10 +2700,11 @@ namespace ModBrowser
             if (field == null)
                 return;
 
-            string text = field.Value ?? "";
+            string text = NormalizeEditorText(field.Value);
             _createCaretIndex += delta;
             if (_createCaretIndex < 0) _createCaretIndex = 0;
             if (_createCaretIndex > text.Length) _createCaretIndex = text.Length;
+            EnsureCreateCaretVisible();
         }
 
         private void MoveCreateCaretHome()
@@ -2234,8 +2714,10 @@ namespace ModBrowser
                 return;
             int line;
             int col;
-            GetCaretLineAndColumn(field.Value ?? "", _createCaretIndex, out line, out col);
-            _createCaretIndex = GetCaretIndexFromLineAndColumn(field.Value ?? "", line, 0);
+            string text = NormalizeEditorText(field.Value);
+            GetCaretLineAndColumn(text, _createCaretIndex, out line, out col);
+            _createCaretIndex = GetCaretIndexFromLineAndColumn(text, line, 0);
+            EnsureCreateCaretVisible();
         }
 
         private void MoveCreateCaretEnd()
@@ -2243,13 +2725,14 @@ namespace ModBrowser
             var field = GetSelectedCreateField();
             if (field == null)
                 return;
-            string text = field.Value ?? "";
+            string text = NormalizeEditorText(field.Value);
             int line;
             int col;
             GetCaretLineAndColumn(text, _createCaretIndex, out line, out col);
             string[] lines = SplitEditorLines(text);
             int endCol = (line >= 0 && line < lines.Length) ? lines[line].Length : 0;
             _createCaretIndex = GetCaretIndexFromLineAndColumn(text, line, endCol);
+            EnsureCreateCaretVisible();
         }
 
         private void MoveCreateCaretVertical(int deltaLine)
@@ -2258,7 +2741,7 @@ namespace ModBrowser
             if (field == null)
                 return;
 
-            string text = field.Value ?? "";
+            string text = NormalizeEditorText(field.Value);
             int line;
             int col;
             GetCaretLineAndColumn(text, _createCaretIndex, out line, out col);
@@ -2270,6 +2753,28 @@ namespace ModBrowser
             if (targetLine >= 0 && targetLine < lines.Length && targetCol > lines[targetLine].Length)
                 targetCol = lines[targetLine].Length;
             _createCaretIndex = GetCaretIndexFromLineAndColumn(text, targetLine, targetCol);
+            EnsureCreateCaretVisible();
+        }
+
+        private void EnsureCreateCaretVisible()
+        {
+            var field = GetSelectedCreateField();
+            if (field == null)
+                return;
+
+            string text = NormalizeEditorText(field.Value);
+            int line;
+            int col;
+            GetCaretLineAndColumn(text, _createCaretIndex, out line, out col);
+            int lineStep = _smallFont.LineSpacing + 2;
+            int headerHeight = Math.Max(_smallFont.LineSpacing + 12, _createEditorSearchRect.Height + 8);
+            int contentTop = _rightRect.Top + headerHeight + 8;
+            int maxVisibleLines = Math.Max(1, (_createEditorRect.Bottom - contentTop - 12) / lineStep);
+
+            if (line < _createEditorScroll)
+                _createEditorScroll = line;
+            if (line >= _createEditorScroll + maxVisibleLines)
+                _createEditorScroll = Math.Max(0, line - maxVisibleLines + 1);
         }
 
         private void DrawCreateEditorCaret(SpriteBatch sb, string rawText, Rectangle lineGutter, int contentTop, int lineNumberWidth)
@@ -2293,7 +2798,7 @@ namespace ModBrowser
                 return; // Caret is not visible
 
             string[] lines = SplitEditorLines(rawText);
-            string currentLine = lineIndex < lines.Length ? (lines[lineIndex] ?? "").Replace("\t", "    ") : "";
+            string currentLine = lineIndex < lines.Length ? ExpandTabs(lines[lineIndex] ?? "") : "";
             if (columnIndex < 0)
                 columnIndex = 0;
             if (columnIndex > currentLine.Length)
@@ -2494,6 +2999,42 @@ namespace ModBrowser
             }
         }
 
+        private void SaveSelectedCreateModFiles()
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(_currentModRootPath) || !Directory.Exists(_currentModRootPath))
+                {
+                    _status = "No created mod folder selected.";
+                    _statusColor = Color.Yellow;
+                    return;
+                }
+
+                string modName = Path.GetFileName(_currentModRootPath);
+                string csprojPath = Path.Combine(_currentModRootPath, modName + ".csproj");
+                if (!File.Exists(csprojPath))
+                {
+                    var anyCsproj = Directory.GetFiles(_currentModRootPath, "*.csproj", SearchOption.TopDirectoryOnly);
+                    if (anyCsproj.Length > 0)
+                        csprojPath = anyCsproj[0];
+                }
+
+                WriteFileUtf8(Path.Combine(_currentModRootPath, modName + ".cs"), GetCreateCodeFieldValue("file_main"));
+                WriteFileUtf8(Path.Combine(_currentModRootPath, "Patching", "GamePatches.cs"), GetCreateCodeFieldValue("file_patches"));
+                WriteFileUtf8(Path.Combine(_currentModRootPath, "Properties", "AssemblyInfo.cs"), GetCreateCodeFieldValue("file_assemblyinfo"));
+                WriteFileUtf8(csprojPath, GetCreateCodeFieldValue("file_csproj"));
+                WriteFileUtf8(Path.Combine(_currentModRootPath, "README.md"), GetCreateCodeFieldValue("file_readme"));
+                LoadModByName(modName);
+                _status = "Saved created mod files.";
+                _statusColor = Color.LightGreen;
+            }
+            catch (Exception ex)
+            {
+                _status = "Save failed: " + ex.Message;
+                _statusColor = Color.OrangeRed;
+            }
+        }
+
         private void CreateModStarterFiles()
         {
             try
@@ -2613,6 +3154,8 @@ namespace ModBrowser
                 WriteFileUtf8(Path.Combine(modRoot, "README.md"), readmeText);
                 SyncManagedCreateProjectFile(modRoot, modName, guid);
                 SetCreateCodeFieldValue("file_csproj", SafeReadText(csprojPath));
+                RefreshCreatedModFolders(false);
+                LoadModByName(modName);
 
                 _status = "Created local mod files in !Mods\\ModBrowser\\Created Mod\\" + modName;
                 _statusColor = Color.LightGreen;
@@ -2738,9 +3281,11 @@ namespace ModBrowser
 
         private static string GetCreatedModsRoot()
         {
-            // GetModsInstallRoot() returns the !Mods directory (parent of ModBrowser folder)
-            // So we append "Created Mod" to get the actual created mods directory
-            return Path.Combine(GetModsInstallRoot(), "Created Mod");
+            string mods = GetModsInstallRoot();
+            string folderName = Path.GetFileName(mods);
+            if (string.Equals(folderName, "ModBrowser", StringComparison.OrdinalIgnoreCase))
+                return Path.Combine(mods, "Created Mod");
+            return Path.Combine(mods, "ModBrowser", "Created Mod");
         }
 
         // ModBrowser.dll lives at {gameRoot}\!Mods\ModBrowser.dll in the Steam install.
@@ -2751,8 +3296,17 @@ namespace ModBrowser
 
         private static string GetGameInstallRoot()
         {
-            string mods = GetModsInstallRoot();
+            string mods = GetActiveModsRoot();
             return Path.GetDirectoryName(mods) ?? mods;
+        }
+
+        private static string GetActiveModsRoot()
+        {
+            string mods = GetModsInstallRoot();
+            string folderName = Path.GetFileName(mods);
+            if (string.Equals(folderName, "ModBrowser", StringComparison.OrdinalIgnoreCase))
+                return Path.GetDirectoryName(mods) ?? mods;
+            return mods;
         }
 
         private static string ResolveReferencePath(string fileName)
@@ -3601,26 +4155,26 @@ using System.Runtime.InteropServices;
                 .Replace("\t", "\\t");
         }
 
-        private void DrawPreview(SpriteBatch sb, ModCatalogEntry m, int topY)
+        private void DrawPreview(SpriteBatch sb, ModCatalogEntry m, Rectangle box, GameTime gameTime)
         {
-            int boxX = _rightRect.Left + 10;
-            int boxY = topY;
-            int boxW = _rightRect.Width - 20;
-            int boxH = Math.Max(80, _rightRect.Bottom - boxY - 10);
-            var box = new Rectangle(boxX, boxY, boxW, boxH);
-            sb.Draw(_white, box, new Color(18, 22, 29, 220));
-            DrawBorder(sb, box, new Color(62, 75, 95, 255));
+            sb.Draw(_white, box, new Color(15, 20, 29, 245));
+            DrawBorder(sb, box, new Color(52, 76, 112, 255));
+            sb.Draw(_white, new Rectangle(box.Left + 1, box.Top + 1, box.Width - 2, Math.Max(28, _smallFont.LineSpacing + 12)), new Color(21, 29, 42, 255));
 
-            var lbl = new Vector2(box.Left + 6, box.Top + 4);
+            var lbl = new Vector2(box.Left + 10, box.Top + 7);
             sb.DrawString(_smallFont, "Preview", lbl + new Vector2(1, 1), Color.Black);
-            sb.DrawString(_smallFont, "Preview", lbl, Color.White);
+            sb.DrawString(_smallFont, "Preview", lbl, new Color(220, 232, 248, 255));
 
             if (_previewTexture != null && !string.IsNullOrWhiteSpace(_previewLoadedUrl))
             {
-                int pad = 8;
-                var area = new Rectangle(box.Left + pad, box.Top + 22, box.Width - (pad * 2), box.Height - 22 - pad);
+                int pad = 12;
+                int headerH = Math.Max(32, _smallFont.LineSpacing + 16);
+                int playerH = _previewLoadedUrl.EndsWith(".gif", StringComparison.OrdinalIgnoreCase) ? 24 : 0;
+                var area = new Rectangle(box.Left + pad, box.Top + headerH + 8, box.Width - (pad * 2), box.Height - headerH - 18 - playerH);
                 if (area.Width > 4 && area.Height > 4)
                 {
+                    sb.Draw(_white, area, new Color(9, 13, 20, 255));
+                    DrawBorder(sb, area, new Color(32, 46, 68, 255));
                     float sx = area.Width / (float)_previewTexture.Width;
                     float sy = area.Height / (float)_previewTexture.Height;
                     float s = Math.Min(sx, sy);
@@ -3628,6 +4182,16 @@ using System.Runtime.InteropServices;
                     int h = Math.Max(1, (int)(_previewTexture.Height * s));
                     var dst = new Rectangle(area.Left + (area.Width - w) / 2, area.Top + (area.Height - h) / 2, w, h);
                     sb.Draw(_previewTexture, dst, Color.White);
+                }
+                if (playerH > 0)
+                {
+                    var player = new Rectangle(box.Left + pad, box.Bottom - playerH - 8, box.Width - (pad * 2), playerH);
+                    sb.Draw(_white, player, new Color(18, 27, 40, 255));
+                    DrawBorder(sb, player, new Color(46, 70, 104, 255));
+                    string playerText = "GIF PREVIEW  |  STATIC FRAME FOR STABILITY";
+                    var pp = new Vector2(player.Left + 8, player.Top + 5);
+                    sb.DrawString(_smallFont, Clip(playerText, player.Width - 16), pp + new Vector2(1, 1), Color.Black);
+                    sb.DrawString(_smallFont, Clip(playerText, player.Width - 16), pp, new Color(180, 214, 255, 255));
                 }
                 return;
             }
@@ -3638,14 +4202,11 @@ using System.Runtime.InteropServices;
             {
                 msg = "Preview failed to load.";
             }
-            if (!string.IsNullOrWhiteSpace(m.PreviewUrl) &&
-                m.PreviewUrl.EndsWith(".gif", StringComparison.OrdinalIgnoreCase))
-            {
-                msg = "GIF preview skipped (use PNG for smoother FPS).";
-            }
+            if (IsVideoUrl(m.PreviewUrl) || !string.IsNullOrWhiteSpace(GetSelectedModVideoUrl(m)))
+                msg = "Media preview available. Use the MEDIA button.";
             if (!string.IsNullOrWhiteSpace(m.PreviewPath) && string.IsNullOrWhiteSpace(m.PreviewUrl))
                 msg = "Preview path found, but URL could not be resolved.";
-            var p = new Vector2(box.Left + 8, box.Top + 28);
+            var p = new Vector2(box.Left + 12, box.Top + Math.Max(40, _smallFont.LineSpacing + 22));
             sb.DrawString(_smallFont, Clip(msg, box.Width - 16), p + new Vector2(1, 1), Color.Black);
             sb.DrawString(_smallFont, Clip(msg, box.Width - 16), p, Color.LightGray);
         }
@@ -3658,7 +4219,7 @@ using System.Runtime.InteropServices;
             string url = (m.PreviewUrl ?? "").Trim();
             if (string.IsNullOrWhiteSpace(url))
                 return;
-            if (url.EndsWith(".gif", StringComparison.OrdinalIgnoreCase))
+            if (IsVideoUrl(url))
                 return;
 
             Texture2D cached;
@@ -3773,23 +4334,91 @@ using System.Runtime.InteropServices;
 
             try
             {
-                using (var ms = new MemoryStream(bytes))
-                {
-                    var tex = Texture2D.FromStream(device, ms);
-                    Texture2D old;
-                    if (_previewCache.TryGetValue(pendingUrl, out old) && old != null && !ReferenceEquals(old, tex))
-                        old.Dispose();
-                    _previewCache[pendingUrl] = tex;
-                    _previewTexture = tex;
-                    _previewLoadedUrl = pendingUrl;
-                    _previewFailedUrl = null;
-                }
+                var tex = CreatePreviewTexture(device, bytes, pendingUrl);
+                Texture2D old;
+                if (_previewCache.TryGetValue(pendingUrl, out old) && old != null && !ReferenceEquals(old, tex))
+                    old.Dispose();
+                _previewCache[pendingUrl] = tex;
+                _previewTexture = tex;
+                _previewLoadedUrl = pendingUrl;
+                _previewFailedUrl = null;
             }
             catch
             {
                 _previewLoadedUrl = null;
                 _previewFailedUrl = pendingUrl;
             }
+        }
+
+        private Texture2D CreatePreviewTexture(GraphicsDevice device, byte[] bytes, string url)
+        {
+            if (!string.IsNullOrWhiteSpace(url) && url.EndsWith(".gif", StringComparison.OrdinalIgnoreCase))
+            {
+                using (var source = new MemoryStream(bytes))
+                using (var image = System.Drawing.Image.FromStream(source))
+                using (var frame = new System.Drawing.Bitmap(image.Width, image.Height))
+                using (var g = System.Drawing.Graphics.FromImage(frame))
+                using (var png = new MemoryStream())
+                {
+                    g.Clear(System.Drawing.Color.Transparent);
+                    g.DrawImage(image, 0, 0, image.Width, image.Height);
+                    frame.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+                    png.Position = 0;
+                    return Texture2D.FromStream(device, png);
+                }
+            }
+            using (var ms = new MemoryStream(bytes))
+            {
+                return Texture2D.FromStream(device, ms);
+            }
+        }
+
+        private static bool IsVideoUrl(string url)
+        {
+            string value = (url ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            int q = value.IndexOf('?');
+            if (q >= 0)
+                value = value.Substring(0, q);
+            int hash = value.IndexOf('#');
+            if (hash >= 0)
+                value = value.Substring(0, hash);
+
+            return value.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) ||
+                   value.EndsWith(".webm", StringComparison.OrdinalIgnoreCase) ||
+                   value.EndsWith(".mov", StringComparison.OrdinalIgnoreCase) ||
+                   value.EndsWith(".wmv", StringComparison.OrdinalIgnoreCase) ||
+                   value.EndsWith(".avi", StringComparison.OrdinalIgnoreCase) ||
+                   value.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string GetSelectedModVideoUrl(ModCatalogEntry m)
+        {
+            if (m == null)
+                return null;
+
+            if (!string.IsNullOrWhiteSpace(m.VideoUrl))
+                return m.VideoUrl.Trim();
+            if (IsVideoUrl(m.PreviewUrl))
+                return (m.PreviewUrl ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(m.PreviewUrl) && m.PreviewUrl.EndsWith(".gif", StringComparison.OrdinalIgnoreCase))
+                return m.PreviewUrl.Trim();
+            return null;
+        }
+
+        private static bool IsCatalogTypeValue(string value)
+        {
+            string v = (value ?? "").Trim();
+            return v.Equals("mod", StringComparison.OrdinalIgnoreCase) ||
+                   v.Equals("mods", StringComparison.OrdinalIgnoreCase) ||
+                   v.Equals("texturepack", StringComparison.OrdinalIgnoreCase) ||
+                   v.Equals("texture-pack", StringComparison.OrdinalIgnoreCase) ||
+                   v.Equals("texture pack", StringComparison.OrdinalIgnoreCase) ||
+                   v.Equals("weaponaddon", StringComparison.OrdinalIgnoreCase) ||
+                   v.Equals("weapon-addon", StringComparison.OrdinalIgnoreCase) ||
+                   v.Equals("weapon addon", StringComparison.OrdinalIgnoreCase);
         }
 
         private void DrawStatus(SpriteBatch sb)
@@ -3887,7 +4516,7 @@ using System.Runtime.InteropServices;
                 return;
 
             _loading = true;
-            _status = "Loading catalog...";
+            _status = "Checking catalog for updates...";
             _statusColor = Color.LightGray;
 
             ThreadPool.QueueUserWorkItem(_ =>
@@ -3929,10 +4558,12 @@ using System.Runtime.InteropServices;
                         _allMods.AddRange(communityMods);
                     }
                     ApplySourceFilter();
+                    RebuildUpdateCache();
                     _scroll = 0;
                     if (_allMods.Count > 0)
                     {
-                        _status = "Loaded " + _allMods.Count + " mods";
+                        int updates = _modsWithUpdates.Count;
+                        _status = "Loaded " + _allMods.Count + " mods" + (updates > 0 ? (" | Updates: " + updates) : " | No updates found");
                         _statusColor = Color.LightGreen;
                         BeginPreviewPrefetch();
                     }
@@ -3960,7 +4591,7 @@ using System.Runtime.InteropServices;
             for (int i = 0; i < _mods.Count; i++)
             {
                 string u = (_mods[i].PreviewUrl ?? "").Trim();
-                if (!string.IsNullOrWhiteSpace(u) && !u.EndsWith(".gif", StringComparison.OrdinalIgnoreCase))
+                if (!string.IsNullOrWhiteSpace(u) && !IsVideoUrl(u))
                     urls.Add(u);
             }
 
@@ -4021,11 +4652,9 @@ using System.Runtime.InteropServices;
             {
                 try
                 {
-                    string modsRoot = Path.GetDirectoryName(typeof(ModBrowserScreen).Assembly.Location) ?? ".";
                     var plan = BuildInstallPlan(entry, out var missing);
-                    int installed = 0;
                     int skipped = 0;
-                    var failures = new List<string>();
+                    var installPlan = new List<ModCatalogEntry>();
 
                     for (int i = 0; i < plan.Count; i++)
                     {
@@ -4033,40 +4662,256 @@ using System.Runtime.InteropServices;
                         if (mod == null)
                             continue;
 
-                        if (IsModAlreadyDownloaded(mod, modsRoot))
+                        if (IsModAlreadyDownloaded(mod, GetActiveModsRoot()) && !IsUpdateCached(mod))
                         {
                             skipped++;
                             continue;
                         }
 
-                        string detail;
-                        bool ok = GitHubCatalogService.DownloadModDll(mod, modsRoot, MBConfig.HttpTimeoutSeconds, out detail);
-                        if (ok)
-                            installed++;
-                        else
-                            failures.Add((mod.Name ?? mod.Id ?? "mod") + ": " + detail);
+                        installPlan.Add(mod);
                     }
 
-                    if (failures.Count == 0)
+                    if (installPlan.Count == 0)
                     {
-                        if (installed > 0)
-                            _downloadedAnyThisSession = true;
-                        _status = "Downloaded " + installed + " mod(s)" +
+                        _status = "Already have selected mod" +
                                   (skipped > 0 ? (" | Already have: " + skipped) : "") +
                                   (missing.Count > 0 ? (" | Missing deps: " + string.Join(", ", missing.ToArray())) : "");
-                        _statusColor = missing.Count > 0 ? Color.Yellow : Color.LightGreen;
+                        _statusColor = Color.Yellow;
+                        return;
                     }
-                    else
+
+                    string detail;
+                    if (!StageExternalUpdate(installPlan, out detail))
                     {
-                        _status = "Install failed (" + failures.Count + "): " + string.Join(" | ", failures.ToArray());
+                        _status = detail;
                         _statusColor = Color.OrangeRed;
+                        return;
                     }
+
+                    _status = "Ready to install " + installPlan.Count + " mod(s)" +
+                              (skipped > 0 ? (" | Already have: " + skipped) : "") +
+                              (missing.Count > 0 ? (" | Missing deps: " + string.Join(", ", missing.ToArray())) : "");
+                    _statusColor = missing.Count > 0 ? Color.Yellow : Color.LightGreen;
                 }
                 finally
                 {
                     _installing = false;
                 }
             });
+        }
+
+        private void BeginUpdateAll()
+        {
+            if (_installing || _loading)
+                return;
+
+            var updates = new List<ModCatalogEntry>();
+            for (int i = 0; i < _allMods.Count; i++)
+            {
+                if (IsModInCurrentSource(_allMods[i]) && IsUpdateCached(_allMods[i]))
+                    updates.Add(_allMods[i]);
+            }
+
+            if (updates.Count == 0)
+            {
+                _status = "No updates are available in " + GetCurrentSourceName() + ". Press CHECK UPDATES first if needed.";
+                _statusColor = Color.Yellow;
+                return;
+            }
+
+            _installing = true;
+            _status = "Preparing external updater for " + updates.Count + " " + GetCurrentSourceName() + " mod(s)...";
+            _statusColor = Color.LightGray;
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    string detail;
+                    if (!StageExternalUpdate(updates, out detail))
+                    {
+                        _status = detail;
+                        _statusColor = Color.OrangeRed;
+                        return;
+                    }
+
+                    _status = detail;
+                    _statusColor = Color.LightGreen;
+                }
+                finally
+                {
+                    _installing = false;
+                }
+            });
+        }
+
+        private bool StageExternalUpdate(List<ModCatalogEntry> updates, out string detail)
+        {
+            detail = "";
+            try
+            {
+                string modsRoot = GetActiveModsRoot();
+                string gameRoot = GetGameInstallRoot();
+                string pendingRoot = Path.Combine(modsRoot, "ModBrowser", "PendingUpdates");
+                string packageRoot = Path.Combine(pendingRoot, DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture));
+                Directory.CreateDirectory(packageRoot);
+
+                var packagePaths = new List<string>();
+                var skipped = new List<string>();
+                for (int i = 0; i < updates.Count; i++)
+                {
+                    var mod = updates[i];
+                    string modName = mod.Name ?? mod.Id ?? "mod";
+                    string url;
+                    string resolveDetail;
+                    if (!GitHubCatalogService.ResolveDownloadUrl(mod, MBConfig.HttpTimeoutSeconds, out url, out resolveDetail))
+                    {
+                        skipped.Add(modName + ": " + resolveDetail);
+                        continue;
+                    }
+
+                    string fileName = Path.GetFileName(new Uri(url).AbsolutePath);
+                    if (string.IsNullOrWhiteSpace(fileName))
+                        fileName = SlugifyForFile(GetModKey(mod)) + ".dll";
+
+                    string packagePath = Path.Combine(packageRoot, SanitizeBatchFileName(fileName));
+                    string downloadDetail;
+                    if (!DownloadFileForExternalUpdater(url, packagePath, out downloadDetail))
+                    {
+                        skipped.Add(modName + ": " + downloadDetail);
+                        continue;
+                    }
+
+                    packagePaths.Add(packagePath);
+                    WriteInstalledVersion(mod);
+                    _modsWithUpdates.Remove(GetModKey(mod));
+                }
+
+                if (packagePaths.Count == 0)
+                {
+                    detail = "No updates could be staged. Skipped: " + string.Join(" | ", skipped.ToArray());
+                    return false;
+                }
+
+                string batPath = Path.Combine(packageRoot, "ApplyModUpdates.bat");
+                File.WriteAllText(batPath, BuildExternalUpdaterBatch(packageRoot, modsRoot, gameRoot, packagePaths.ToArray()), Encoding.Default);
+                detail = "Updater started. The game will close, apply " + packagePaths.Count + " update(s), then restart." +
+                         (skipped.Count > 0 ? (" Skipped " + skipped.Count + ": " + string.Join(" | ", skipped.ToArray())) : "");
+                _pendingUpdaterBatPath = batPath;
+                _externalUpdaterPromptTitle = "Update Ready";
+                _pendingUpdaterMessage = "A console window will open, unzip updates, replace files, then restart the game.";
+                _showExternalUpdaterPrompt = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = "Could not start updater: " + ex.Message;
+                return false;
+            }
+        }
+
+        private static bool DownloadFileForExternalUpdater(string url, string targetPath, out string detail)
+        {
+            detail = "";
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
+                using (var client = new WebClient())
+                {
+                    client.Headers[HttpRequestHeader.UserAgent] = "CastleForge-ModBrowser/1.0";
+                    client.DownloadFile(url, targetPath);
+                }
+
+                return File.Exists(targetPath);
+            }
+            catch (Exception ex)
+            {
+                detail = ex.GetType().Name + ": " + ex.Message;
+                return false;
+            }
+        }
+
+        private static string BuildExternalUpdaterBatch(string packageRoot, string modsRoot, string gameRoot, string[] packagePaths)
+        {
+            string gameExe = Path.Combine(gameRoot, "CastleMinerZ.exe");
+            var sb = new StringBuilder();
+            sb.AppendLine("@echo off");
+            sb.AppendLine("setlocal");
+            sb.AppendLine("title CastleForge Mod Updater");
+            sb.AppendLine("echo CastleForge Mod Updater");
+            sb.AppendLine("echo Waiting for CastleMiner Z to close...");
+            sb.AppendLine("timeout /t 2 /nobreak >nul");
+            sb.AppendLine("taskkill /IM CastleMinerZ.exe /F >nul 2>nul");
+            sb.AppendLine(":waitgame");
+            sb.AppendLine("tasklist /FI \"IMAGENAME eq CastleMinerZ.exe\" 2>nul | find /I \"CastleMinerZ.exe\" >nul");
+            sb.AppendLine("if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto waitgame)");
+            sb.AppendLine("echo Applying mod updates...");
+            sb.AppendLine("set \"MODS=" + EscapeBatchValue(modsRoot) + "\"");
+            sb.AppendLine("set \"PKGROOT=" + EscapeBatchValue(packageRoot) + "\"");
+            sb.AppendLine("if not exist \"%MODS%\" mkdir \"%MODS%\"");
+            for (int i = 0; i < packagePaths.Length; i++)
+            {
+                string p = packagePaths[i];
+                string ext = Path.GetExtension(p);
+                if (string.Equals(ext, ".zip", StringComparison.OrdinalIgnoreCase))
+                {
+                    string extractDir = Path.Combine(packageRoot, "Extracted_" + i.ToString(CultureInfo.InvariantCulture));
+                    sb.AppendLine("echo Extracting " + Path.GetFileName(p));
+                    sb.AppendLine("if exist \"" + EscapeBatchValue(extractDir) + "\" rmdir /s /q \"" + EscapeBatchValue(extractDir) + "\"");
+                    sb.AppendLine("mkdir \"" + EscapeBatchValue(extractDir) + "\"");
+                    sb.AppendLine("powershell -NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '" + EscapePowerShellSingleQuoted(p) + "' -DestinationPath '" + EscapePowerShellSingleQuoted(extractDir) + "' -Force\"");
+                    sb.AppendLine("if errorlevel 1 (echo ERROR: Failed to extract " + Path.GetFileName(p) + " & goto updaterror)");
+                    sb.AppendLine("echo Copying files from " + Path.GetFileName(p));
+                    sb.AppendLine("for /r \"" + EscapeBatchValue(extractDir) + "\" %%f in (*.dll *.json *.ini *.txt *.md) do @copy /Y \"%%f\" \"%MODS%\\\" >nul");
+                    sb.AppendLine("if errorlevel 1 (echo ERROR: Failed to copy files from " + Path.GetFileName(p) + " & goto updaterror)");
+                }
+                else
+                {
+                    sb.AppendLine("echo Copying " + Path.GetFileName(p));
+                    sb.AppendLine("copy /Y \"" + EscapeBatchValue(p) + "\" \"%MODS%\\\" >nul");
+                    sb.AppendLine("if errorlevel 1 goto updaterror");
+                }
+            }
+            sb.AppendLine("echo Done.");
+            if (File.Exists(gameExe))
+            {
+                sb.AppendLine("echo Starting game...");
+                sb.AppendLine("start \"\" \"" + EscapeBatchValue(gameExe) + "\"");
+                sb.AppendLine("echo Waiting for game window to appear...");
+                sb.AppendLine("timeout /t 8 /nobreak >nul");
+                sb.AppendLine("echo Checking if game is running...");
+                sb.AppendLine("tasklist /FI \"IMAGENAME eq CastleMinerZ.exe\" 2>nul | find /I \"CastleMinerZ.exe\" >nul");
+                sb.AppendLine("if errorlevel 1 (echo WARNING: Game may not have started. Check for errors above.)");
+            }
+            sb.AppendLine("echo Updater complete. Closing console...");
+            sb.AppendLine("timeout /t 3 /nobreak >nul");
+            sb.AppendLine("exit /b 0");
+            sb.AppendLine(":updaterror");
+            sb.AppendLine("echo.");
+            sb.AppendLine("echo Update failed. Try running the game as administrator or move it out of Program Files.");
+            sb.AppendLine("pause");
+            sb.AppendLine("exit /b 1");
+            return sb.ToString();
+        }
+
+        private static string SanitizeBatchFileName(string value)
+        {
+            string name = Path.GetFileName(value ?? "");
+            if (string.IsNullOrWhiteSpace(name))
+                return Guid.NewGuid().ToString("N") + ".dll";
+            foreach (char c in Path.GetInvalidFileNameChars())
+                name = name.Replace(c, '_');
+            return name;
+        }
+
+        private static string EscapeBatchValue(string value)
+        {
+            return (value ?? "").Replace("\"", "\"\"");
+        }
+
+        private static string EscapePowerShellSingleQuoted(string value)
+        {
+            return (value ?? "").Replace("'", "''");
         }
 
         private bool IsModAlreadyDownloaded(ModCatalogEntry mod, string modsRoot)
@@ -4099,7 +4944,7 @@ using System.Runtime.InteropServices;
                 {
                     string ext = Path.GetExtension(files[i]);
                     if (!string.Equals(ext, ".dll", StringComparison.OrdinalIgnoreCase) &&
-                        !string.Equals(ext, ".zip", StringComparison.OrdinalIgnoreCase))
+                        !string.Equals(ext, ".json", StringComparison.OrdinalIgnoreCase))
                         continue;
 
                     string fn = SlugifyForFile(Path.GetFileNameWithoutExtension(files[i]));
@@ -4119,6 +4964,109 @@ using System.Runtime.InteropServices;
             {
                 return false;
             }
+        }
+
+        private bool IsUpdateAvailable(ModCatalogEntry mod)
+        {
+            if (mod == null)
+                return false;
+
+            string catalogVersion = NormalizeVersionForCompare(mod.Version);
+            if (string.IsNullOrWhiteSpace(catalogVersion))
+                return false;
+
+            string installedVersion = NormalizeVersionForCompare(ReadInstalledVersion(mod));
+            if (string.IsNullOrWhiteSpace(installedVersion))
+                return IsModAlreadyDownloaded(mod, GetActiveModsRoot());
+
+            return !string.Equals(installedVersion, catalogVersion, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private bool IsUpdateCached(ModCatalogEntry mod)
+        {
+            return mod != null && _modsWithUpdates.Contains(GetModKey(mod));
+        }
+
+        private bool IsModInCurrentSource(ModCatalogEntry mod)
+        {
+            if (mod == null)
+                return false;
+            if (_sourceMode == BrowserSourceMode.Official)
+                return mod.Official;
+            if (_sourceMode == BrowserSourceMode.Community)
+                return !mod.Official;
+            return true;
+        }
+
+        private string GetCurrentSourceName()
+        {
+            if (_sourceMode == BrowserSourceMode.Official)
+                return "Official";
+            if (_sourceMode == BrowserSourceMode.Community)
+                return "Community";
+            return "All";
+        }
+
+        private void RebuildUpdateCache()
+        {
+            _modsWithUpdates.Clear();
+            for (int i = 0; i < _allMods.Count; i++)
+            {
+                if (IsUpdateAvailable(_allMods[i]))
+                    _modsWithUpdates.Add(GetModKey(_allMods[i]));
+            }
+        }
+
+        private static string ReadInstalledVersion(ModCatalogEntry mod)
+        {
+            try
+            {
+                string path = GetInstalledVersionPath(mod);
+                if (!File.Exists(path))
+                    return "";
+                return File.ReadAllText(path).Trim();
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private static void WriteInstalledVersion(ModCatalogEntry mod)
+        {
+            try
+            {
+                string path = GetInstalledVersionPath(mod);
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(path, (mod.Version ?? "").Trim());
+            }
+            catch
+            {
+            }
+        }
+
+        private static string GetInstalledVersionPath(ModCatalogEntry mod)
+        {
+            string key = SlugifyForFile(GetModKey(mod));
+            if (string.IsNullOrWhiteSpace(key))
+                key = "unknown";
+            string mods = Path.GetDirectoryName(typeof(ModBrowserScreen).Assembly.Location) ?? ".";
+            string folderName = Path.GetFileName(mods);
+            string browserRoot = string.Equals(folderName, "ModBrowser", StringComparison.OrdinalIgnoreCase)
+                ? mods
+                : Path.Combine(mods, "ModBrowser");
+            string root = Path.Combine(browserRoot, "Installed");
+            return Path.Combine(root, key + ".version");
+        }
+
+        private static string NormalizeVersionForCompare(string version)
+        {
+            string v = (version ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(v) || IsCatalogTypeValue(v))
+                return "";
+            if (v.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+                v = v.Substring(1);
+            return v.Trim();
         }
 
         private static string SlugifyForFile(string value)
@@ -4321,7 +5269,7 @@ using System.Runtime.InteropServices;
             if (_scroll < 0)
                 _scroll = 0;
 
-            int visibleRows = GetBrowserVisibleRows(_smallFont.LineSpacing + 10);
+            int visibleRows = GetBrowserVisibleRows(Math.Max(34, _smallFont.LineSpacing + 12));
             int maxScroll = Math.Max(0, _visibleIndices.Count - visibleRows);
             if (_scroll > maxScroll)
                 _scroll = maxScroll;
@@ -4462,6 +5410,9 @@ using System.Runtime.InteropServices;
             if (_buildBusy)
                 return;
 
+            if (!string.IsNullOrWhiteSpace(_currentModRootPath) && Directory.Exists(_currentModRootPath))
+                SaveSelectedCreateModFiles();
+
             string modsRoot = GetCreatedModsRoot();
             if (!Directory.Exists(modsRoot))
             {
@@ -4519,7 +5470,7 @@ using System.Runtime.InteropServices;
                 }
 
                 // Copy directly to game's !Mods folder to load as active mods
-                string gameModsPath = Path.Combine(GetGameInstallRoot(), "!Mods");
+                string gameModsPath = GetActiveModsRoot();
                 if (!Directory.Exists(gameModsPath))
                 {
                     _status = "Game !Mods folder not found at: " + gameModsPath;
@@ -4599,6 +5550,12 @@ using System.Runtime.InteropServices;
             _buildLastWarningCount = 0;
             _buildLastErrorCount = 0;
             _buildLastSummary = "";
+            _buildDiagLines = new List<string>();
+            _buildOutputLines = new List<string>();
+            _buildLastProjectPath = csprojPath;
+            _buildLastOutputLogPath = Path.Combine(modRoot, "output.log");
+            _buildOutputScroll = 0;
+            _createShowTemplateTab = true;
             _showBuildPopup = true;
             _status = "Building mod...";
             _statusColor = Color.LightGray;
@@ -4649,17 +5606,19 @@ using System.Runtime.InteropServices;
                         _buildLastSummary      = summary;
                         _buildPopupMessage     = summary;
                         _buildDiagLines        = diagLines;
+                        _buildOutputLines      = outputLines;
                         _buildCompleted = true;
                         _status = succeeded
                             ? ("Build succeeded — Warnings: " + warnings + "  Errors: " + errors)
                             : ("Build FAILED — Errors: " + errors + "  Warnings: " + warnings);
                         _statusColor = succeeded ? Color.LightGreen : Color.OrangeRed;
                         if (succeeded)
-                            _downloadedAnyThisSession = true;
+                            ShowCloseGamePrompt("Build Complete", "Built DLLs will load next time you start the game.");
 
                         try
                         {
                             string outputLogPath = Path.Combine(capturedModRoot, "output.log");
+                            _buildLastOutputLogPath = outputLogPath;
                             WriteFileUtf8(outputLogPath, fullOutput.ToString());
                         }
                         catch { }
@@ -4672,6 +5631,7 @@ using System.Runtime.InteropServices;
                     _buildLastErrorCount = 1;
                     _buildLastSummary = "Build error: " + ex.Message;
                     _buildPopupMessage = "Build error: " + ex.Message;
+                    _buildOutputLines = new List<string> { ex.ToString() };
                     _status = "Build failed: " + ex.Message;
                     _statusColor = Color.OrangeRed;
                 }

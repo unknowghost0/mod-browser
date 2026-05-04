@@ -1,5 +1,41 @@
 # Mod Browser - Release Notes
 
+## Version 3.4.7
+
+### New Features
+- **Staged External Updater**: Installs and updates are now staged in `!Mods\ModBrowser\PendingUpdates` and applied after the game closes.
+- **Visible Update Console**: The updater opens a console window showing progress for each extraction and copy step.
+- **Automatic Game Restart**: After updates finish, the updater restarts CastleMiner Z and closes the console automatically.
+- **UPDATE ALL Button**: Added an `UPDATE ALL` action for updating every available mod update in the current browser source tab.
+- **Source-Aware Updates**: `UPDATE ALL` respects the selected source tab, so `Official`, `Community`, and `All` update only the expected visible set.
+- **Post-Update Verification**: When Mod Browser opens after an update, it checks installed DLLs and reports whether updates appear to be applied.
+
+### Improvements
+- **ZIP Update Support**: ZIP packages are extracted after the game closes, then copied into `!Mods`.
+- **Locked DLL Handling**: Updates no longer try to replace loaded DLLs while CastleMiner Z is running.
+- **One-Button Update Prompt**: Successful installs/updates show a single `OK` prompt that closes the game and starts the updater.
+- **Partial Failure Handling**: Broken or missing downloads are skipped during bulk updates instead of failing the entire update run.
+- **Clearer Status Messages**: Update messages now report staged updates, skipped mods, and verification results.
+- **Safer Batch Flow**: The updater waits for the game to close, applies files, restarts the game, checks that the process started, and exits.
+
+### Bug Fixes
+- Fixed update-all behavior so it does not update community mods while only the official tab is selected, and vice versa.
+- Fixed silent updater behavior by launching the batch through a visible `cmd.exe` window.
+- Fixed ZIP extraction reliability by splitting archive extraction and file copying into separate checked steps.
+- Fixed console staying open after successful updates.
+- Fixed reload prompt behavior by replacing the old reload notice with the close-and-apply update flow.
+- Fixed build error caused by missing `System.Globalization` import.
+
+### Technical Changes
+- Added staged package downloads for `.dll` and `.zip` assets.
+- Added `ApplyModUpdates.bat` generation.
+- Added external updater prompt state and UI rendering.
+- Added source filtering helpers for update-all.
+- Added batch error handling for failed extraction/copy steps.
+- Added installed-version verification on Browser open.
+
+---
+
 ## Version 2.1.0
 
 ### New Features
@@ -48,7 +84,7 @@ Initial release with core mod browsing and management features.
 
 ## Installation & Update
 
-To update to v2.1.0:
+To update to v3.4.7:
 1. Download the latest ModBrowser.dll
 2. Replace the old DLL in your `!Mods\ModBrowser\` folder
 3. Restart CastleForge

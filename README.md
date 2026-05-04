@@ -6,7 +6,9 @@ GitHub-backed in-game browser and creator flow for CastleForge community content
 - Adds `Mod Browser` to the main menu and pause menu.
 - Loads the live CastleForge community catalog from GitHub.
 - Shows mod details and preview images inside the game.
-- Downloads installable `.dll` files into the live `!Mods` folder when a catalog entry exposes a release/download link.
+- Downloads and updates installable `.dll` and `.zip` mod packages from catalog release/download links.
+- Stages installs and updates in `!Mods\ModBrowser\PendingUpdates`, then applies them with an external updater after the game closes.
+- Adds `UPDATE ALL` support for updating all visible mods in the current source tab.
 - Includes a `Create Mod` workspace that scaffolds:
   - a local CastleForge mod source folder
   - a PR-ready community entry folder for `CastleForge-CommunityMods`
@@ -25,6 +27,34 @@ For the live community browser, `CatalogUrl` should point to the raw generated i
 Example:
 
 `https://raw.githubusercontent.com/RussDev7/CastleForge-CommunityMods/main/Index/mods.json`
+
+## Install and update flow
+Mod Browser v3.4.7 uses a staged updater for mod installs and updates.
+
+When you install a mod or press `UPDATE ALL`:
+
+1. Mod Browser resolves each mod's release/download URL.
+2. Download packages are staged under:
+   `<GameRoot>\!Mods\ModBrowser\PendingUpdates\<timestamp>\`
+3. Mod Browser creates `ApplyModUpdates.bat`.
+4. The game shows a one-button `OK` prompt.
+5. Pressing `OK` opens a visible updater console and closes the game.
+6. The updater waits for `CastleMinerZ.exe` to close.
+7. It extracts `.zip` packages and copies `.dll`, `.json`, `.ini`, `.txt`, and `.md` files into `!Mods`.
+8. It restarts CastleMiner Z.
+9. The console closes itself after the game starts.
+
+This flow avoids replacing loaded DLLs while the game is running.
+
+## Update All behavior
+- `UPDATE ALL` only updates mods that belong to the currently selected source tab:
+  - `Official`
+  - `Community`
+  - `All`
+- Mods that cannot resolve or download are skipped instead of stopping the whole update.
+- Skipped mods are reported in the status message.
+- The updater shows visible progress for each extraction/copy step.
+- On the next Mod Browser open, installed mods are verified against the catalog and a status message reports whether anything still appears missing.
 
 ## Community repo workflow
 The publish flow changed.
@@ -108,4 +138,5 @@ The in-game creator now fills the modern community template fields, including:
 ## Notes
 - The browser side still reads the repo's generated catalog JSON.
 - The creator side now targets the repo's folder-per-entry PR workflow.
-- If a catalog entry only provides docs/source links and no direct DLL asset, install may not be available from inside the browser.
+- If a catalog entry only provides docs/source links and no direct DLL or ZIP asset, install may not be available from inside the browser.
+- ZIP packages are extracted by the external updater after the game closes so locked DLLs can be safely replaced.

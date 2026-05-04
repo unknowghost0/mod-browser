@@ -14,6 +14,7 @@
   "releases_url": "https://github.com/yourname/example-community-mod/releases",
   "readme_path": "Mods/ExampleCommunityMod/README.md",
   "preview_path": "Mods/ExampleCommunityMod/preview.png",
+  "video_path": "Mods/ExampleCommunityMod/preview.mp4",
   "tags": [
     "community",
     "mod"

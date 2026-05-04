@@ -1,4 +1,0 @@
-C:\Users\Admin\Documents\cmz modded\CastleForge-main\Build\Debug\!Mods\ModBrowser.dll
-C:\Users\Admin\Documents\cmz modded\CastleForge-main\CastleForge\Mods\Mod Browser\obj\x86\Debug\ModBrowser.csproj.AssemblyReference.cache
-C:\Users\Admin\Documents\cmz modded\CastleForge-main\CastleForge\Mods\Mod Browser\obj\x86\Debug\ModBrowser.csproj.CoreCompileInputs.cache
-C:\Users\Admin\Documents\cmz modded\CastleForge-main\CastleForge\Mods\Mod Browser\obj\x86\Debug\ModBrowser.dll

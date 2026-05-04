@@ -1,15 +1,12 @@
 {
-  "title": "CastleForge Catalog",
-  "mods": [
-    {
-      "id": "ModBrowser",
-      "name": "Mod Browser",
-      "author": "unknowghost",
-      "version": "2.1.0",
-      "description": "A comprehensive mod management browser for CastleForge",
-      "dll_url": "https://github.com/unknowghost0/mod-browser/releases/tag/mod_browser/ModBrowser.dll",
-      "page_url": "https://github.com/unknowghost0/mod-browser",
-      "preview_url": "preview.png"
-    }
-  ]
+  "name": "ModBrowser",
+  "displayName": "Mod Browser",
+  "author": "unknowghost",
+  "version": "3.4.7",
+  "description": "A comprehensive mod management browser for CastleForge. Browse, install, update, and manage community mods directly from the game with staged ZIP/DLL updates and automatic restart support.",
+  "tags": ["utility", "modmanagement", "community"],
+  "dll_url": "https://github.com/unknowghost0/mod-browser/releases/download/v3.4.7/ModBrowser.dll",
+  "page_url": "https://github.com/unknowghost0/mod-browser",
+  "preview_url": "preview.png",
+  "dependencies": []
 }

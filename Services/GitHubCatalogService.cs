@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
@@ -38,6 +39,9 @@ namespace ModBrowser
         [DataMember(Name = "version")]
         public string Version = null;
 
+        [DataMember(Name = "castleforge_version")]
+        public string CastleForgeVersion = null;
+
         [DataMember(Name = "description")]
         public string Description = null;
 
@@ -55,6 +59,12 @@ namespace ModBrowser
 
         [DataMember(Name = "preview_url")]
         public string PreviewUrl = null;
+
+        [DataMember(Name = "video_path")]
+        public string VideoPath = null;
+
+        [DataMember(Name = "video_url")]
+        public string VideoUrl = null;
 
         [DataMember(Name = "official")]
         public bool Official;
@@ -100,6 +110,9 @@ namespace ModBrowser
         [DataMember(Name = "name")]
         public string Name = null;
 
+        [DataMember(Name = "displayName")]
+        public string DisplayName = null;
+
         [DataMember(Name = "slug")]
         public string Slug = null;
 
@@ -109,8 +122,29 @@ namespace ModBrowser
         [DataMember(Name = "author")]
         public string Author = null;
 
+        [DataMember(Name = "version")]
+        public string Version = null;
+
+        [DataMember(Name = "castleforge_version")]
+        public string CastleForgeVersion = null;
+
         [DataMember(Name = "summary")]
         public string Summary = null;
+
+        [DataMember(Name = "description")]
+        public string Description = null;
+
+        [DataMember(Name = "dll_url")]
+        public string DllUrl = null;
+
+        [DataMember(Name = "page_url")]
+        public string PageUrl = null;
+
+        [DataMember(Name = "preview_url")]
+        public string PreviewUrl = null;
+
+        [DataMember(Name = "video_url")]
+        public string VideoUrl = null;
 
         [DataMember(Name = "source_repo")]
         public string SourceRepo = null;
@@ -120,6 +154,9 @@ namespace ModBrowser
 
         [DataMember(Name = "preview_path")]
         public string PreviewPath = null;
+
+        [DataMember(Name = "video_path")]
+        public string VideoPath = null;
 
         [DataMember(Name = "dependencies")]
         public string[] Dependencies = null;
@@ -233,7 +270,24 @@ namespace ModBrowser
 
                 var parsedMods = ParseCatalogText(text, effectiveUrl);
                 if (parsedMods.Count > 0)
+                {
+                    if (LooksLikeWebUrl(catalogUrl) && HasCommunityEntriesMissingVersion(parsedMods))
+                    {
+                        var scannedMods = TryBuildFromCommunityRepoScan(catalogUrl, timeoutSeconds);
+                        if (scannedMods != null && scannedMods.Count > 0)
+                        {
+                            EnrichMissingVersions(parsedMods, scannedMods);
+                            if (!HasCommunityEntriesMissingVersion(parsedMods))
+                                return parsedMods;
+                        }
+                        EnrichMissingVersionsFromEntryRepos(parsedMods, timeoutSeconds);
+                        if (!HasCommunityEntriesMissingVersion(parsedMods))
+                            return parsedMods;
+                        if (scannedMods != null && scannedMods.Count > 0)
+                            return scannedMods;
+                    }
                     return parsedMods;
+                }
 
                 if (LooksLikeWebUrl(catalogUrl))
                 {
@@ -250,6 +304,10 @@ namespace ModBrowser
                                 return parsedMods;
                         }
                     }
+
+                    parsedMods = TryBuildFromCommunityRepoScan(catalogUrl, timeoutSeconds);
+                    if (parsedMods != null && parsedMods.Count > 0)
+                        return parsedMods;
                 }
 
                 if (LooksLikeHtmlDocument(text))
@@ -285,6 +343,10 @@ namespace ModBrowser
             if (indexMods != null && indexMods.Count > 0)
                 return indexMods;
 
+            var singleManifestMods = TryBuildFromSingleCommunityManifest(text, sourceUrl);
+            if (singleManifestMods != null && singleManifestMods.Count > 0)
+                return singleManifestMods;
+
             try
             {
                 using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(text ?? "")))
@@ -298,6 +360,89 @@ namespace ModBrowser
             catch
             {
                 return new List<ModCatalogEntry>();
+            }
+        }
+
+        private static bool HasCommunityEntriesMissingVersion(List<ModCatalogEntry> mods)
+        {
+            if (mods == null || mods.Count == 0)
+                return false;
+
+            for (int i = 0; i < mods.Count; i++)
+            {
+                var m = mods[i];
+                if (m != null && !m.Official && string.IsNullOrWhiteSpace(m.Version))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static string NormalizeEntryName(string value)
+        {
+            return Regex.Replace((value ?? "").Trim().ToLowerInvariant(), @"[^a-z0-9]+", "");
+        }
+
+        private static void EnrichMissingVersions(List<ModCatalogEntry> target, List<ModCatalogEntry> source)
+        {
+            if (target == null || source == null)
+                return;
+
+            for (int i = 0; i < target.Count; i++)
+            {
+                var dst = target[i];
+                if (dst == null || dst.Official || !string.IsNullOrWhiteSpace(dst.Version))
+                    continue;
+
+                string dstName = NormalizeEntryName(dst.Name ?? dst.Id);
+                for (int j = 0; j < source.Count; j++)
+                {
+                    var src = source[j];
+                    if (src == null || string.IsNullOrWhiteSpace(src.Version))
+                        continue;
+
+                    string srcName = NormalizeEntryName(src.Name ?? src.Id);
+                    if (string.Equals(dstName, srcName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        dst.Version = src.Version;
+                        break;
+                    }
+                }
+            }
+        }
+
+        private static void EnrichMissingVersionsFromEntryRepos(List<ModCatalogEntry> mods, int timeoutSeconds)
+        {
+            if (mods == null)
+                return;
+
+            for (int i = 0; i < mods.Count; i++)
+            {
+                var m = mods[i];
+                if (m == null || m.Official || !string.IsNullOrWhiteSpace(m.Version))
+                    continue;
+
+                string ownerRepo;
+                if (!TryGetGitHubOwnerRepoFromCatalogUrl(m.PageUrl, out ownerRepo))
+                    continue;
+
+                var rootMods = TryFetchRootCommunityManifest(ownerRepo, timeoutSeconds);
+                if (rootMods != null && rootMods.Count > 0)
+                {
+                    EnrichMissingVersions(new List<ModCatalogEntry> { m }, rootMods);
+                    if (string.IsNullOrWhiteSpace(m.Version) && rootMods.Count == 1)
+                        m.Version = rootMods[0].Version;
+                    if (!string.IsNullOrWhiteSpace(m.Version))
+                        continue;
+                }
+
+                var repoMods = TryBuildFromCommunityRepoScan("https://github.com/" + ownerRepo, timeoutSeconds);
+                if (repoMods == null || repoMods.Count == 0)
+                    continue;
+
+                EnrichMissingVersions(new List<ModCatalogEntry> { m }, repoMods);
+                if (string.IsNullOrWhiteSpace(m.Version) && repoMods.Count == 1)
+                    m.Version = repoMods[0].Version;
             }
         }
 
@@ -319,7 +464,7 @@ namespace ModBrowser
                     string resolved;
                     if (!TryResolveDllUrl(entry, timeoutSeconds, out resolved))
                     {
-                        detail = "No direct DLL URL found for this entry. Add dll_url in catalog or publish a .dll in latest GitHub release.";
+                        detail = "No direct DLL/ZIP URL found for this entry. Add dll_url in catalog or publish a .dll/.zip in latest GitHub release.";
                         return false;
                     }
                     entry.DllUrl = resolved;
@@ -333,7 +478,10 @@ namespace ModBrowser
                     !fileName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
                     fileName += ".dll";
 
-                string targetPath = Path.Combine(modsRoot, fileName);
+                bool isZip = fileName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+                string targetPath = isZip
+                    ? Path.Combine(Path.GetTempPath(), "CastleForge-ModBrowser-" + Guid.NewGuid().ToString("N") + ".zip")
+                    : Path.Combine(modsRoot, fileName);
 
                 string dlError;
                 if (!TryDownloadFileWithFallback(entry.DllUrl, targetPath, timeoutSeconds, out dlError))
@@ -342,6 +490,9 @@ namespace ModBrowser
                     return false;
                 }
 
+                if (isZip)
+                    return InstallZipAndDelete(targetPath, modsRoot, out detail);
+
                 detail = "Installed to " + targetPath;
                 return true;
             }
@@ -349,6 +500,142 @@ namespace ModBrowser
             {
                 detail = ex.GetType().Name + ": " + ex.Message;
                 return false;
+            }
+        }
+
+        public static bool ResolveDownloadUrl(ModCatalogEntry entry, int timeoutSeconds, out string url, out string detail)
+        {
+            url = null;
+            detail = "";
+            try
+            {
+                if (entry == null)
+                {
+                    detail = "No mod selected.";
+                    return false;
+                }
+
+                if (!string.IsNullOrWhiteSpace(entry.DllUrl))
+                {
+                    url = entry.DllUrl;
+                    return true;
+                }
+
+                string resolved;
+                if (!TryResolveDllUrl(entry, timeoutSeconds, out resolved))
+                {
+                    detail = "No direct DLL/ZIP URL found for this entry.";
+                    return false;
+                }
+
+                entry.DllUrl = resolved;
+                url = resolved;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = ex.GetType().Name + ": " + ex.Message;
+                return false;
+            }
+        }
+
+        private static bool InstallZipAndDelete(string zipPath, string modsRoot, out string detail)
+        {
+            detail = "";
+            int extracted = 0;
+            try
+            {
+                using (var archive = ZipFile.OpenRead(zipPath))
+                {
+                    for (int i = 0; i < archive.Entries.Count; i++)
+                    {
+                        var entry = archive.Entries[i];
+                        if (entry == null || string.IsNullOrWhiteSpace(entry.Name))
+                            continue;
+
+                        string ext = Path.GetExtension(entry.Name);
+                        if (!string.Equals(ext, ".dll", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(ext, ".json", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(ext, ".ini", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(ext, ".txt", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(ext, ".md", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        string safeName = SanitizeFileName(entry.Name);
+                        string destination = Path.Combine(modsRoot, safeName);
+                        string extractError;
+                        if (!TryExtractEntryToFile(entry, destination, out extractError))
+                        {
+                            detail = extractError;
+                            return false;
+                        }
+                        extracted++;
+                    }
+                }
+
+                try { File.Delete(zipPath); } catch { }
+
+                if (extracted <= 0)
+                {
+                    detail = "ZIP did not contain installable files.";
+                    return false;
+                }
+
+                detail = "Extracted " + extracted + " file(s) to " + modsRoot + " and deleted ZIP.";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = "ZIP install failed: " + ex.Message;
+                return false;
+            }
+        }
+
+        private static bool TryExtractEntryToFile(ZipArchiveEntry entry, string destination, out string error)
+        {
+            error = null;
+            string tempPath = null;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(destination));
+                tempPath = Path.Combine(Path.GetTempPath(), "CastleForge-ModBrowser-" + Guid.NewGuid().ToString("N") + Path.GetExtension(destination));
+                entry.ExtractToFile(tempPath);
+
+                if (File.Exists(destination))
+                {
+                    try
+                    {
+                        File.SetAttributes(destination, FileAttributes.Normal);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                File.Copy(tempPath, destination, true);
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                error = "Access denied writing " + destination + ". Close the game and run CastleMiner Z as administrator, or move the game out of Program Files.";
+                return false;
+            }
+            catch (IOException ex)
+            {
+                error = "Could not replace " + destination + ". The DLL may be in use; close/restart the game before updating. " + ex.Message;
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = "Could not extract " + entry.Name + ": " + ex.Message;
+                return false;
+            }
+            finally
+            {
+                if (!string.IsNullOrWhiteSpace(tempPath))
+                {
+                    try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                }
             }
         }
 
@@ -475,9 +762,13 @@ namespace ModBrowser
         private static bool TryDownloadFileWithFallback(string url, string targetPath, int timeoutSeconds, out string error)
         {
             error = null;
+            string tempPath = null;
 
             try
             {
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
+                tempPath = Path.Combine(Path.GetTempPath(), "CastleForge-ModBrowser-" + Guid.NewGuid().ToString("N") + Path.GetExtension(targetPath));
+
                 var req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "GET";
                 req.Timeout = Math.Max(5000, timeoutSeconds * 1000);
@@ -487,11 +778,25 @@ namespace ModBrowser
 
                 using (var res = (HttpWebResponse)req.GetResponse())
                 using (var input = res.GetResponseStream())
-                using (var output = File.Create(targetPath))
+                using (var output = File.Create(tempPath))
                 {
                     input.CopyTo(output);
-                    return true;
                 }
+
+                if (!TryCopyDownloadedFile(tempPath, targetPath, out error))
+                    return false;
+
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                error = "Access denied writing " + targetPath + ". Close the game and run CastleMiner Z as administrator, or move the game out of Program Files.";
+                return false;
+            }
+            catch (IOException ex)
+            {
+                error = "Could not replace " + targetPath + ". The DLL may be in use; close/restart the game before updating. " + ex.Message;
+                return false;
             }
             catch (Exception ex)
             {
@@ -502,10 +807,55 @@ namespace ModBrowser
                 }
 
                 string psError;
-                if (TryPowerShellDownloadFile(url, targetPath, timeoutSeconds, out psError))
+                if (TryPowerShellDownloadFile(url, tempPath ?? targetPath, timeoutSeconds, out psError) &&
+                    TryCopyDownloadedFile(tempPath ?? targetPath, targetPath, out psError))
                     return true;
 
                 error = ex.GetType().Name + ": " + ex.Message + " | PS fallback failed: " + psError;
+                return false;
+            }
+            finally
+            {
+                if (!string.IsNullOrWhiteSpace(tempPath))
+                {
+                    try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                }
+            }
+        }
+
+        private static bool TryCopyDownloadedFile(string sourcePath, string targetPath, out string error)
+        {
+            error = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+                {
+                    error = "Downloaded file was not created.";
+                    return false;
+                }
+
+                if (File.Exists(targetPath))
+                {
+                    try
+                    {
+                        File.SetAttributes(targetPath, FileAttributes.Normal);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                File.Copy(sourcePath, targetPath, true);
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                error = "Access denied writing " + targetPath + ". Close the game and run CastleMiner Z as administrator, or move the game out of Program Files.";
+                return false;
+            }
+            catch (IOException ex)
+            {
+                error = "Could not replace " + targetPath + ". The DLL may be in use; close/restart the game before updating. " + ex.Message;
                 return false;
             }
         }
@@ -627,6 +977,7 @@ namespace ModBrowser
                         continue;
                     if (string.IsNullOrWhiteSpace(m.DllUrl) && string.IsNullOrWhiteSpace(m.ReleasesUrl))
                         continue;
+                    m.Version = PickDisplayVersion(m.Version, m.CastleForgeVersion);
                     result.Add(m);
                 }
                 return result;
@@ -665,6 +1016,22 @@ namespace ModBrowser
             return result;
         }
 
+        private static string PickDisplayVersion(string version, string castleForgeVersion)
+        {
+            if (!string.IsNullOrWhiteSpace(version))
+                return version.Trim();
+            if (!string.IsNullOrWhiteSpace(castleForgeVersion) && !LooksLikeCompatibilityVersion(castleForgeVersion))
+                return castleForgeVersion.Trim();
+            return null;
+        }
+
+        private static bool LooksLikeCompatibilityVersion(string value)
+        {
+            string v = (value ?? "").Trim();
+            return v.StartsWith("core-", StringComparison.OrdinalIgnoreCase) ||
+                   v.EndsWith("+", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static List<ModCatalogEntry> TryBuildFromCommunityIndex(string text, string catalogUrl)
         {
             try
@@ -684,22 +1051,25 @@ namespace ModBrowser
                         if (r == null)
                             continue;
                         string cat = (r.Category ?? "").Trim();
-                        string summary = r.Summary ?? "";
+                        string entryName = string.IsNullOrWhiteSpace(r.DisplayName) ? r.Name : r.DisplayName;
+                        string summary = string.IsNullOrWhiteSpace(r.Summary) ? r.Description : r.Summary;
                         if (!string.IsNullOrWhiteSpace(cat))
                             summary = "[" + cat + "] " + summary;
 
                         result.Add(new ModCatalogEntry
                         {
                             Id = string.IsNullOrWhiteSpace(r.Slug) ? r.Name : r.Slug,
-                            Name = r.Name,
+                            Name = entryName,
                             Author = r.Author,
-                            Version = cat,
+                            Version = PickDisplayVersion(r.Version, r.CastleForgeVersion),
                             Description = summary,
-                            DllUrl = "",
-                            PageUrl = string.IsNullOrWhiteSpace(r.SourceRepo) ? r.ReleasesUrl : r.SourceRepo,
+                            DllUrl = r.DllUrl,
+                            PageUrl = !string.IsNullOrWhiteSpace(r.PageUrl) ? r.PageUrl : (string.IsNullOrWhiteSpace(r.SourceRepo) ? r.ReleasesUrl : r.SourceRepo),
                             ReleasesUrl = r.ReleasesUrl,
                             PreviewPath = r.PreviewPath,
-                            PreviewUrl = ResolveRelativeUrl(string.IsNullOrWhiteSpace(baseRaw) ? catalogUrl : baseRaw, r.PreviewPath),
+                            PreviewUrl = !string.IsNullOrWhiteSpace(r.PreviewUrl) ? ResolveRelativeUrl(string.IsNullOrWhiteSpace(baseRaw) ? catalogUrl : baseRaw, r.PreviewUrl) : ResolveRelativeUrl(string.IsNullOrWhiteSpace(baseRaw) ? catalogUrl : baseRaw, r.PreviewPath),
+                            VideoPath = r.VideoPath,
+                            VideoUrl = !string.IsNullOrWhiteSpace(r.VideoUrl) ? ResolveRelativeUrl(string.IsNullOrWhiteSpace(baseRaw) ? catalogUrl : baseRaw, r.VideoUrl) : ResolveRelativeUrl(string.IsNullOrWhiteSpace(baseRaw) ? catalogUrl : baseRaw, r.VideoPath),
                             Official = false,
                             Dependencies = r.Dependencies,
                             Requires = r.Requires
@@ -713,6 +1083,38 @@ namespace ModBrowser
             {
                 return new List<ModCatalogEntry>();
             }
+        }
+
+        private static List<ModCatalogEntry> TryBuildFromSingleCommunityManifest(string text, string catalogUrl)
+        {
+            CommunityIndexEntry row;
+            if (!TryReadCommunityManifest(text, out row) || row == null || string.IsNullOrWhiteSpace(row.Name))
+                return new List<ModCatalogEntry>();
+
+            string baseUrl = GetDirectoryUrl(catalogUrl);
+            string entryName = string.IsNullOrWhiteSpace(row.DisplayName) ? row.Name : row.DisplayName;
+            string summary = string.IsNullOrWhiteSpace(row.Summary) ? row.Description : row.Summary;
+            return new List<ModCatalogEntry>
+            {
+                new ModCatalogEntry
+                {
+                    Id = string.IsNullOrWhiteSpace(row.Slug) ? SlugifyId(row.Name) : row.Slug,
+                    Name = entryName,
+                    Author = row.Author,
+                    Version = PickDisplayVersion(row.Version, row.CastleForgeVersion),
+                    Description = summary,
+                    DllUrl = row.DllUrl,
+                    PageUrl = !string.IsNullOrWhiteSpace(row.PageUrl) ? row.PageUrl : (string.IsNullOrWhiteSpace(row.SourceRepo) ? row.ReleasesUrl : row.SourceRepo),
+                    ReleasesUrl = row.ReleasesUrl,
+                    PreviewPath = row.PreviewPath,
+                    PreviewUrl = !string.IsNullOrWhiteSpace(row.PreviewUrl) ? ResolveRelativeUrl(baseUrl, row.PreviewUrl) : ResolveRelativeUrl(baseUrl, row.PreviewPath),
+                    VideoPath = row.VideoPath,
+                    VideoUrl = !string.IsNullOrWhiteSpace(row.VideoUrl) ? ResolveRelativeUrl(baseUrl, row.VideoUrl) : ResolveRelativeUrl(baseUrl, row.VideoPath),
+                    Official = false,
+                    Dependencies = row.Dependencies,
+                    Requires = row.Requires
+                }
+            };
         }
 
         private static string TryGetRawBasePath(string catalogUrl)
@@ -747,6 +1149,19 @@ namespace ModBrowser
                 return null;
 
             return rawBasePath + p.TrimStart('/');
+        }
+
+        private static string GetDirectoryUrl(string url)
+        {
+            string value = (url ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            int slash = value.LastIndexOf('/');
+            if (slash < 0)
+                return value;
+
+            return value.Substring(0, slash + 1);
         }
 
         private static List<ModCatalogEntry> TryBuildFromCommunityRepoScan(string catalogUrl, int timeoutSeconds)
@@ -785,6 +1200,7 @@ namespace ModBrowser
                         continue;
 
                     string manifestUrl = BuildRawGitHubUrl(ownerRepo, path);
+                    string manifestBaseUrl = GetDirectoryUrl(manifestUrl);
                     if (string.IsNullOrWhiteSpace(manifestUrl))
                         continue;
 
@@ -794,39 +1210,32 @@ namespace ModBrowser
                         continue;
 
                     CommunityIndexEntry row;
-                    try
-                    {
-                        using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(manifestJson ?? "")))
-                        {
-                            var ser = new DataContractJsonSerializer(typeof(CommunityIndexEntry));
-                            row = ser.ReadObject(ms) as CommunityIndexEntry;
-                        }
-                    }
-                    catch
-                    {
+                    if (!TryReadCommunityManifest(manifestJson, out row))
                         continue;
-                    }
 
                     if (row == null || string.IsNullOrWhiteSpace(row.Name))
                         continue;
 
                     string category = NormalizeCategoryLabel(row.Category);
-                    string summary = row.Summary ?? "";
+                    string entryName = string.IsNullOrWhiteSpace(row.DisplayName) ? row.Name : row.DisplayName;
+                    string summary = string.IsNullOrWhiteSpace(row.Summary) ? row.Description : row.Summary;
                     if (!string.IsNullOrWhiteSpace(category))
                         summary = "[" + category + "] " + summary;
 
                     result.Add(new ModCatalogEntry
                     {
                         Id = string.IsNullOrWhiteSpace(row.Slug) ? SlugifyId(row.Name) : row.Slug,
-                        Name = row.Name,
+                        Name = entryName,
                         Author = row.Author,
-                        Version = category,
+                        Version = PickDisplayVersion(row.Version, row.CastleForgeVersion),
                         Description = summary,
-                        DllUrl = "",
-                        PageUrl = string.IsNullOrWhiteSpace(row.SourceRepo) ? row.ReleasesUrl : row.SourceRepo,
+                        DllUrl = row.DllUrl,
+                        PageUrl = !string.IsNullOrWhiteSpace(row.PageUrl) ? row.PageUrl : (string.IsNullOrWhiteSpace(row.SourceRepo) ? row.ReleasesUrl : row.SourceRepo),
                         ReleasesUrl = row.ReleasesUrl,
                         PreviewPath = row.PreviewPath,
-                        PreviewUrl = BuildRawGitHubUrl(ownerRepo, row.PreviewPath),
+                        PreviewUrl = !string.IsNullOrWhiteSpace(row.PreviewUrl) ? ResolveRelativeUrl(manifestBaseUrl, row.PreviewUrl) : BuildRawGitHubUrl(ownerRepo, row.PreviewPath),
+                        VideoPath = row.VideoPath,
+                        VideoUrl = !string.IsNullOrWhiteSpace(row.VideoUrl) ? ResolveRelativeUrl(manifestBaseUrl, row.VideoUrl) : BuildRawGitHubUrl(ownerRepo, row.VideoPath),
                         Official = false
                     });
                 }
@@ -837,6 +1246,20 @@ namespace ModBrowser
             {
                 return new List<ModCatalogEntry>();
             }
+        }
+
+        private static List<ModCatalogEntry> TryFetchRootCommunityManifest(string ownerRepo, int timeoutSeconds)
+        {
+            string url = BuildRawGitHubUrl(ownerRepo, "mod.json");
+            if (string.IsNullOrWhiteSpace(url))
+                return new List<ModCatalogEntry>();
+
+            string text;
+            string error;
+            if (!TryFetchTextWithFallback(url, timeoutSeconds, out text, out error))
+                return new List<ModCatalogEntry>();
+
+            return TryBuildFromSingleCommunityManifest(text, url);
         }
 
         private static bool TryGetGitHubOwnerRepoFromCatalogUrl(string catalogUrl, out string ownerRepo)
@@ -883,8 +1306,63 @@ namespace ModBrowser
 
             return Regex.IsMatch(
                 normalized,
-                @"^(Mods|TexturePacks|WeaponAddons)/[^/]+/mod\.json$",
+                @"^(mod\.json|((Mods|TexturePacks|WeaponAddons)/[^/]+|[^/]+)/mod\.json)$",
                 RegexOptions.IgnoreCase);
+        }
+
+        private static bool TryReadCommunityManifest(string manifestJson, out CommunityIndexEntry row)
+        {
+            row = null;
+
+            try
+            {
+                using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(manifestJson ?? "")))
+                {
+                    var ser = new DataContractJsonSerializer(typeof(CommunityIndexEntry));
+                    row = ser.ReadObject(ms) as CommunityIndexEntry;
+                }
+            }
+            catch
+            {
+                row = null;
+            }
+
+            if (row != null && !string.IsNullOrWhiteSpace(row.Name))
+                return true;
+
+            try
+            {
+                using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(manifestJson ?? "")))
+                {
+                    var ser = new DataContractJsonSerializer(typeof(ModCatalogDocument));
+                    var doc = ser.ReadObject(ms) as ModCatalogDocument;
+                    if (doc == null || doc.Mods == null || doc.Mods.Count == 0 || doc.Mods[0] == null)
+                        return false;
+
+                    var m = doc.Mods[0];
+                    row = new CommunityIndexEntry
+                    {
+                        Name = m.Name,
+                        Slug = m.Id,
+                        Author = m.Author,
+                        Version = m.Version,
+                        CastleForgeVersion = m.CastleForgeVersion,
+                        Summary = m.Description,
+                        SourceRepo = m.PageUrl,
+                        ReleasesUrl = m.ReleasesUrl,
+                        PreviewPath = m.PreviewPath,
+                        VideoPath = m.VideoPath,
+                        Dependencies = m.Dependencies,
+                        Requires = m.Requires
+                    };
+                    return !string.IsNullOrWhiteSpace(row.Name);
+                }
+            }
+            catch
+            {
+                row = null;
+                return false;
+            }
         }
 
         private static string BuildRawGitHubUrl(string ownerRepo, string repoPath)
@@ -951,7 +1429,7 @@ namespace ModBrowser
                         Id = SlugifyId(name),
                         Name = name,
                         Author = author,
-                        Version = displayCategory,
+                        Version = null,
                         Description = desc,
                         DllUrl = "",
                         PageUrl = string.IsNullOrWhiteSpace(sourceUrl) ? readmeUrl : sourceUrl,
